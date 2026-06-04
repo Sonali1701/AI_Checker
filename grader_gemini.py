@@ -1,0 +1,208 @@
+"""Gemini-backed grader. Mirrors grader.py's public interface so app.py can swap providers."""
+from __future__ import annotations
+
+import os
+
+from google import genai
+from google.genai import types
+
+# Reuse the Pydantic schema + system prompts from the Claude grader so both backends
+# produce structurally-identical GradeReport objects.
+from grader import (
+    GradeReport,
+    RUBRIC_GEN_PROMPT,
+    build_system_prompt,
+    exam_context_block,
+)
+from mathpix import PageOCR, overlay_anchors_on_png
+
+DEFAULT_MODEL = "gemini-2.5-pro"
+
+
+def _make_client(api_key: str | None, use_vertex: bool,
+                 project: str | None = None, location: str | None = None) -> genai.Client:
+    """Three modes:
+    1. Developer API (default): vertexai=False, api_key required
+    2. Vertex AI Express: vertexai=True, api_key required (key starts with 'AQ.')
+    3. Vertex AI with ADC: vertexai=True, project+location, no api_key
+    """
+    if use_vertex:
+        key = api_key or os.environ.get("GOOGLE_API_KEY")
+        if key:
+            # Vertex Express Mode — API key auth, no project/location needed
+            return genai.Client(vertexai=True, api_key=key)
+        # ADC mode — needs project + location
+        return genai.Client(
+            vertexai=True,
+            project=project or os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            location=location or os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        )
+    return genai.Client(api_key=api_key or os.environ.get("GOOGLE_API_KEY"))
+
+
+def _image_part(png_bytes: bytes) -> types.Part:
+    return types.Part.from_bytes(data=png_bytes, mime_type="image/png")
+
+
+def _text_part(text: str) -> types.Part:
+    return types.Part.from_text(text=text)
+
+
+def generate_rubric(
+    question_paper_pngs: list[bytes],
+    model: str = DEFAULT_MODEL,
+    api_key: str | None = None,
+    use_vertex: bool = False,
+    project: str | None = None,
+    location: str | None = None,
+    student_class: str | None = None,
+    subject: str | None = None,
+) -> str:
+    client = _make_client(api_key, use_vertex, project, location)
+
+    parts: list[types.Part] = []
+    ctx = exam_context_block(student_class, subject)
+    if ctx:
+        parts.append(_text_part(ctx))
+    parts.append(_text_part("Question paper:"))
+    for png in question_paper_pngs:
+        parts.append(_image_part(png))
+    parts.append(_text_part("Produce the marking rubric for this paper as described in the system instruction."))
+
+    resp = client.models.generate_content(
+        model=model,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(
+            system_instruction=RUBRIC_GEN_PROMPT,
+            temperature=0,
+            max_output_tokens=8000,
+        ),
+    )
+    return resp.text
+
+
+def grade_answer_sheet(
+    question_paper_pngs: list[bytes],
+    student_pngs: list[bytes],
+    answer_key_pngs: list[bytes] | None = None,
+    answer_key_text: str | None = None,
+    ocr_transcript: str | None = None,
+    ocr_pages: list[PageOCR] | None = None,
+    model: str = DEFAULT_MODEL,
+    api_key: str | None = None,
+    use_vertex: bool = False,
+    project: str | None = None,
+    location: str | None = None,
+    student_class: str | None = None,
+    subject: str | None = None,
+) -> GradeReport:
+    if not answer_key_pngs and not answer_key_text:
+        raise ValueError("Provide either answer_key_pngs or answer_key_text.")
+
+    client = _make_client(api_key, use_vertex, project, location)
+
+    parts: list[types.Part] = []
+    ctx = exam_context_block(student_class, subject)
+    if ctx:
+        parts.append(_text_part(ctx))
+    parts.append(_text_part("=== QUESTION PAPER ==="))
+    for png in question_paper_pngs:
+        parts.append(_image_part(png))
+
+    parts.append(_text_part("=== ANSWER KEY / MARKING SCHEME ==="))
+    if answer_key_text:
+        parts.append(_text_part(answer_key_text))
+    for png in (answer_key_pngs or []):
+        parts.append(_image_part(png))
+
+    overlaid_pngs: list[bytes] = []
+    if ocr_pages:
+        ocr_by_page = {p.page: p for p in ocr_pages}
+        for i, png in enumerate(student_pngs, start=1):
+            po = ocr_by_page.get(i)
+            overlaid_pngs.append(overlay_anchors_on_png(png, po) if po else png)
+    else:
+        overlaid_pngs = list(student_pngs)
+
+    parts.append(_text_part(f"=== STUDENT'S ANSWER SHEET ({len(overlaid_pngs)} pages, 1-indexed) ==="))
+    if ocr_pages:
+        parts.append(_text_part(
+            "Each line on these page images is overlaid with its OCR line_id (e.g. [P3L7]) in BLUE. "
+            "Question/section header lines are labelled in RED — never anchor a step there. "
+            "Diagram regions are outlined in ORANGE with an anchor like [P7D1] — use those when the "
+            "step's evidence is a figure, table, or hand-drawn diagram (no text). "
+            "Pick step_line_id by LOOKING at the page — match each rubric step to the visible line "
+            "(or diagram region) where the student actually demonstrated that step."
+        ))
+    for i, png in enumerate(overlaid_pngs, start=1):
+        parts.append(_text_part(f"--- Page {i} ---"))
+        parts.append(_image_part(png))
+
+    if ocr_transcript:
+        parts.append(_text_part(
+            "=== OCR TRANSCRIPT OF STUDENT'S ANSWER SHEET (lines labelled [PnLk], diagrams [PnDk]) ===\n"
+            "This transcript mirrors the labels overlaid on the page images. Lines tagged (HEADER) "
+            "are question/section labels — never anchor step ticks to them. Lines tagged "
+            "(DIAGRAM REGION) are blank bands where a figure/table lives — use them when the step "
+            "is satisfied by a drawing.\n\n" + ocr_transcript
+        ))
+
+    parts.append(_text_part(
+        "Now grade the student's answers against the answer key. Return a complete GradeReport: "
+        "every sub-question in `questions`, every top-level question in `section_totals`, total_score "
+        "must equal the sum of sub-question scores."
+        + (" Populate anchor_line_id and target_line_id from the OCR transcript wherever possible." if ocr_transcript else "")
+    ))
+
+    # Use streaming: the new per-sub-part rubric pushes response size up, and
+    # the non-streaming endpoint drops the connection mid-body on long replies
+    # (RemoteProtocolError / "incomplete chunked read"). Streaming reads chunks
+    # as they arrive and survives those long generations.
+    config = types.GenerateContentConfig(
+        system_instruction=build_system_prompt(subject),
+        temperature=0,
+        response_mime_type="application/json",
+        response_schema=GradeReport,
+        max_output_tokens=64000,
+    )
+
+    text_chunks: list[str] = []
+    finish_reason = None
+    last_chunk = None
+    for chunk in client.models.generate_content_stream(
+        model=model,
+        contents=[types.Content(role="user", parts=parts)],
+        config=config,
+    ):
+        last_chunk = chunk
+        if chunk.text:
+            text_chunks.append(chunk.text)
+        try:
+            fr = chunk.candidates[0].finish_reason
+            if fr is not None:
+                finish_reason = fr
+        except (AttributeError, IndexError):
+            pass
+
+    if finish_reason and str(finish_reason).endswith("MAX_TOKENS"):
+        raise RuntimeError(
+            "Gemini hit the output token limit before finishing the GradeReport. "
+            "The answer sheet is too long for one call at this rubric verbosity. "
+            "Try (a) switching to gemini-2.5-flash for higher throughput, "
+            "(b) splitting the sheet into smaller batches, or "
+            "(c) using a tighter rubric with fewer criteria per question."
+        )
+
+    full_text = "".join(text_chunks)
+    if not full_text.strip():
+        raise RuntimeError(
+            f"Gemini returned no text (finish_reason={finish_reason}). "
+            "This is often a safety filter or empty response. Try the other provider or a different model."
+        )
+
+    # Prefer the SDK's pre-parsed object on the last chunk if available; fall
+    # back to validating the concatenated JSON ourselves.
+    parsed = getattr(last_chunk, "parsed", None) if last_chunk is not None else None
+    if not isinstance(parsed, GradeReport):
+        parsed = GradeReport.model_validate_json(full_text)
+    return parsed
