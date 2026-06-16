@@ -1122,6 +1122,16 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     real = [pl for pl in my_lines if not _is_header(pl.get("text") or "")]
     anchor_lines = real or my_lines
 
+    # "Unattempted" = scored 0 with no student writing in the band, or the verdict says so.
+    # Draw NOTHING on the page for these — the margin strip + remark already convey it; a
+    # cross floating on a blank space just looks like litter.
+    _remark_l = (remark or "").lower()
+    unattempted = aw <= 1e-6 and (
+        not real
+        or any(k in _remark_l for k in
+               ("unattempt", "not attempt", "not graded", "no answer", "left blank", "blank answer"))
+    )
+
     mark_style = str(getattr(m, "mark_style", "auto") or "auto").strip().lower()
     if mark_style == "per_step":
         base_step = len(criteria) > 1            # numerical OR enumerated points
@@ -1129,9 +1139,12 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
         base_step = False                        # flowing prose — one tick + total
     else:                                        # "auto": infer from the content
         base_step = len(criteria) > 1 and looks_numerical
+    # Per-step ticks are only for BIG answers (>= 3 marks). A 1- or 2-mark question
+    # gets a single tick + total — teachers don't break 2 marks into "1+1" on the page.
+    MIN_MARKS_FOR_STEP = 3
     # Need somewhere to place the per-step marks; with no anchor lines fall back
     # to the single-mark branch (which handles the empty band via y_fraction).
-    use_step_marks = base_step and bool(anchor_lines)
+    use_step_marks = base_step and bool(anchor_lines) and mx >= MIN_MARKS_FOR_STEP
 
     # When the whole question scored 0 AND the model already wrote a margin
     # remark, skip the per-step crosses — the cursive remark conveys it and a
@@ -1222,12 +1235,17 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
         drawn_by_page = placed_by_page
         ordered_groups = sorted(
             groups.values(), key=lambda g: (g["pl"]["page"], g["pl"]["y0"]))
+        drew_positive = False
         for gi, g in enumerate(ordered_groups):
             pl = g["pl"]
             awarded = g["awarded"]
             max_step = g["max"]
-            if awarded <= 1e-6 and (max_step <= 0 or suppress_zero_crosses):
-                continue  # nothing earned and the remark already explains it
+            # Only tick steps that EARNED marks. A 0-step's cross has no reliable line to
+            # sit on and tends to drift far from the relevant text (the Q17 problem) — the
+            # margin breakdown ("0.5+0+0") already records the zeros, so we don't scatter
+            # floating crosses. A wholly-wrong question gets ONE cross after the loop.
+            if awarded <= 1e-6:
+                continue
 
             pg = student_doc[pl["page"] - 1]
             cwp = _content_width(pg)
@@ -1278,14 +1296,21 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             tick_x = max(floor, tick_x) if floor <= right_cap else right_cap
             tick_x = max(2.0, tick_x)
 
-            if awarded > 0:
-                _draw_tick(pg, tick_x, y_mark, size=tick_size, seed=sstep + "t")
-                mark_x = tick_x + tick_size * 1.5 + circle_r + 6
-                _draw_number_in_circle(pg, mark_x, y_mark, mark_text,
-                                       size=circle_size, seed=sstep)
-            else:
-                # Line attempted but earned nothing — cross it like a teacher.
-                _draw_cross(pg, tick_x, y_mark, size=tick_size, seed=sstep + "x")
+            _draw_tick(pg, tick_x, y_mark, size=tick_size, seed=sstep + "t")
+            mark_x = tick_x + tick_size * 1.5 + circle_r + 6
+            _draw_number_in_circle(pg, mark_x, y_mark, mark_text,
+                                   size=circle_size, seed=sstep)
+            drew_positive = True
+
+        # Whole question earned nothing → ONE clean cross on its first answer line,
+        # never a column of displaced zero-crosses. Skip entirely if unattempted
+        # (no writing to cross — the margin strip + remark say it).
+        if not drew_positive and not suppress_zero_crosses and anchor_lines and not unattempted:
+            first = anchor_lines[0]
+            fpg = student_doc[first["page"] - 1]
+            fx = max(2.0, min(first["x1"] + 12, _content_width(fpg) - 40))
+            fy = (first["y0"] + first["y1"]) / 2
+            _draw_cross(fpg, fx, fy, size=24, seed=seed + "x0")
     else:
         # Single mark question: draw one tick (or cross) where the answer ends.
         # The band can cross a page break, so derive the page from the line we
@@ -1346,8 +1371,9 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             circle13_r = 13 * (1.8 if float(aw).is_integer() else 1.9) + 1.5
             cluster_w = tick_size * 1.7 + circle13_r
             tick_x = max(2.0, min(x_end + 20, mcw - 6 - cluster_w))
-            if aw <= 1e-6:  # Zero marks - only draw cross, no circle
-                _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+            if aw <= 1e-6:  # Zero marks
+                if not unattempted:   # attempted-but-wrong → cross; unattempted → nothing
+                    _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
             else:  # Positive marks - draw tick and circled mark
                 _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
                 circle_x = tick_x + tick_size * 1.7
