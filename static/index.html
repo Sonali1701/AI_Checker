@@ -15,40 +15,7 @@
         <h1>AI Checker</h1>
         <p>Automated handwritten answer-sheet evaluation</p>
       </div>
-      <button id="settingsToggle" class="ghost-btn" type="button">⚙️ Settings</button>
     </header>
-
-    <!-- Settings (optional / admin) -->
-    <section id="settings" class="card settings hidden">
-      <p class="sub">Optional. On a deployed server the API key is configured for you — leave it blank.</p>
-      <div class="grid2">
-        <label>AI provider
-          <select id="provider">
-            <option value="gemini" selected>Gemini (Google)</option>
-            <option value="claude">Claude (Anthropic)</option>
-          </select>
-        </label>
-        <label>Model
-          <select id="model"></select>
-        </label>
-        <label id="apiKeyWrap">API key <span class="hint" id="keyHint"></span>
-          <input id="apiKey" type="password" placeholder="leave blank to use server key" />
-        </label>
-        <label>USD → INR
-          <input id="usdInr" type="number" step="0.5" value="94" />
-        </label>
-      </div>
-      <div class="grid2">
-        <label class="chk"><input id="useMathpix" type="checkbox" /> Use Mathpix OCR (precise tick placement)</label>
-        <label>Mathpix app_key
-          <input id="mathpixKey" type="password" placeholder="optional" />
-        </label>
-        <label class="chk"><input id="logSheet" type="checkbox" /> Log each run to Google Sheet</label>
-        <label>Worksheet/tab (blank = first)
-          <input id="sheetTab" type="text" placeholder="optional" />
-        </label>
-      </div>
-    </section>
 
     <!-- Step 1 -->
     <section class="card">

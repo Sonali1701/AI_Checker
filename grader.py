@@ -353,6 +353,30 @@ def _image_block(png_bytes: bytes) -> dict:
     }
 
 
+# Printed question-paper / answer-key images are downscaled before being sent to the model
+# to cut input-image tokens (cost). Printed text stays legible at this size; student
+# handwriting is NEVER downscaled, so grading accuracy is unaffected.
+_QP_IMAGE_MAX_EDGE = 1500
+
+
+def _downscale_for_model(png: bytes, max_edge: int = _QP_IMAGE_MAX_EDGE) -> bytes:
+    """Return a smaller PNG (long edge ≤ max_edge) for printed pages; original if already
+    small or on any error. Same PNG format — safe for both provider image payloads."""
+    try:
+        img = Image.open(BytesIO(png))
+        w, h = img.size
+        long_edge = max(w, h)
+        if long_edge <= max_edge:
+            return png
+        scale = max_edge / float(long_edge)
+        img = img.convert("RGB").resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return png
+
+
 # ---------- Main grading call ----------
 
 SYSTEM_PROMPT = """You are an experienced school exam evaluator grading handwritten answer sheets.
@@ -621,14 +645,67 @@ At the top, include a one-line total: "**Total: X marks**" reflecting the sum of
 # regex off the PDF text layer (free, instant, can't hallucinate). The LLM extractor below
 # is only a fallback for scanned papers / images that have no text layer.
 
-# A marks tag: "[1 Mark]", "[2 Marks]", "(3 marks)", "[5 mark]" — bracket or paren, sing/plural.
-_MARKS_TAG_RE = re.compile(r"[\[(]\s*(\d+(?:\.\d+)?)\s*marks?\s*[\])]", re.IGNORECASE)
+# A marks tag: "[1 Mark]", "[2 Marks]", "(3 marks)", "[5 mark]", "[2 M]" — bracket/paren,
+# with "M" / "Mark" / "Marks" (the \b stops it matching "[2 metres]").
+_MARKS_TAG_RE = re.compile(r"[\[(]\s*(\d+(?:\.\d+)?)\s*m(?:ark)?s?\b\s*[\])]", re.IGNORECASE)
+# The paper's printed TOTAL: "Max. Marks: 40", "Maximum Marks - 40", "M.M. 40", "Total Marks: 40".
+_TOTAL_MARKS_RE = re.compile(
+    r"(?:max(?:imum)?\.?\s*marks?|m\.?\s*m\.?|total\s*marks?)\s*[:\-]?\s*(\d{1,3})",
+    re.IGNORECASE)
 # A top-level question number at line start: "12." or "12)".
 _QNUM_RE = re.compile(r"^\s*(\d{1,2})\s*[.)]")
 # Lettered sub-part "(a)".."(h)" — lowercase only, so MCQ options "(A)".."(D)" are ignored.
 _SUBLETTER_RE = re.compile(r"^\s*\(?([a-h])\)")
 # Roman sub-part "(i)".."(x)" — lowercase only.
 _SUBROMAN_RE = re.compile(r"^\s*\(?(i{1,3}|iv|v|vi{0,3}|ix|x)\)")
+
+
+def total_marks_from_text(pages_text: list[str]) -> float | None:
+    """The paper's printed maximum total ('Max. Marks: 40'), read deterministically."""
+    for page in pages_text:
+        m = _TOTAL_MARKS_RE.search(page)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def _marks_from_right_column(doc: "fitz.Document") -> list[MarksItem]:
+    """Read per-question marks printed in a right-hand column of bare numbers (the common
+    Indian-board layout: '1', '2', '3' aligned to each question's row). Associates each
+    right-column number with the question number on the same row. Top-level only."""
+    items: list[MarksItem] = []
+    seen: set[str] = set()
+    for page in doc:
+        words = page.get_text("words")  # (x0,y0,x1,y1, text, block, line, wordno)
+        if not words:
+            continue
+        W = page.rect.width
+        qnums: list[tuple[float, int]] = []   # (y_center, qnum) at far left
+        marks: list[tuple[float, int]] = []   # (y_center, value) at far right
+        for w in words:
+            x0, y0, x1, y1, txt = w[0], w[1], w[2], w[3], (w[4] or "").strip()
+            yc = (y0 + y1) / 2.0
+            mqn = re.fullmatch(r"(\d{1,2})[.)]?", txt)
+            if mqn and x0 < W * 0.18:
+                qnums.append((yc, int(mqn.group(1))))
+            elif re.fullmatch(r"\d{1,2}", txt) and x0 > W * 0.82:
+                v = int(txt)
+                if 1 <= v <= 20:
+                    marks.append((yc, v))
+        if not qnums or not marks:
+            continue
+        qnums.sort()
+        for ymark, val in sorted(marks):
+            above = [q for q in qnums if q[0] <= ymark + 8]  # question at/above this row
+            if not above:
+                continue
+            qn = above[-1][1]
+            qid = f"Q{qn}"
+            if qid in seen:
+                continue
+            seen.add(qid)
+            items.append(MarksItem(qid=qid, max=float(val), description=""))
+    return items
 
 
 def marks_scheme_from_text(pages_text: list[str]) -> MarksScheme:
@@ -693,18 +770,42 @@ def _columnar_text(page: "fitz.Page") -> str:
 
 
 def marks_scheme_from_pdf(data: bytes, filename: str) -> MarksScheme | None:
-    """Regex marks scheme from a PDF's text layer. Returns None when not applicable
-    (not a PDF, no text layer, or no tags found) so the caller can fall back to the LLM."""
+    """Deterministic marks scheme from a PDF's text layer — no LLM. Combines three printed
+    sources, in order of authority:
+      1. inline "[N Mark(s)]" / "[N M]" tags (incl. sub-parts a/b, i/ii),
+      2. a right-hand column of bare per-question numbers (common board layout),
+      3. the header total ("Max. Marks: 40") — used as the authoritative grand total.
+    Returns None only when nothing usable is found (e.g. scanned/no text layer)."""
     if not (filename or "").lower().endswith(".pdf") or not data:
         return None
     try:
         doc = fitz.open(stream=data, filetype="pdf")
         pages_text = [_columnar_text(p) for p in doc]
+        raw_text = [p.get_text() for p in doc]           # plain reading order keeps "(a) ... [2 M]" intact
+        header_total = total_marks_from_text(pages_text) or total_marks_from_text(raw_text)
+        col_items = _marks_from_right_column(doc)
         doc.close()
     except Exception:
         return None
-    scheme = marks_scheme_from_text(pages_text)
-    return scheme if scheme.items else None
+
+    # Inline "[N Mark(s)]" tags from BOTH extractions (columnar handles two-column MCQ
+    # pages; raw reading order handles case-study sub-parts) — first qid wins.
+    tag_by_qid: dict[str, MarksItem] = {}
+    for src in (pages_text, raw_text):
+        for it in marks_scheme_from_text(src).items:
+            tag_by_qid.setdefault(it.qid, it)
+    items = list(tag_by_qid.values())
+    covered = {_top_level_qid(it.qid) for it in items}   # e.g. {"Q19", "Q20"}
+    for it in col_items:                                  # add column marks only where tags didn't cover
+        if _top_level_qid(it.qid) not in covered:
+            items.append(it)
+            covered.add(_top_level_qid(it.qid))
+
+    if not items and header_total is None:
+        return None
+    items.sort(key=lambda it: (int(re.search(r"\d+", it.qid).group()), it.qid))
+    total = header_total if header_total is not None else round(sum(i.max for i in items), 3)
+    return MarksScheme(total=round(total, 3), items=items)
 
 
 MARKS_SCHEME_PROMPT = """You are an exam-paper analyst. Read the QUESTION PAPER images and extract the MAXIMUM MARKS for every question and sub-part, EXACTLY as printed.
@@ -818,13 +919,13 @@ def grade_answer_sheet(
         content.append({"type": "text", "text": ctx})
     content.append({"type": "text", "text": "=== QUESTION PAPER ==="})
     for png in question_paper_pngs:
-        content.append(_image_block(png))
+        content.append(_image_block(_downscale_for_model(png)))
 
     content.append({"type": "text", "text": "=== ANSWER KEY / MARKING SCHEME ==="})
     if answer_key_text:
         content.append({"type": "text", "text": answer_key_text})
     for png in (answer_key_pngs or []):
-        content.append(_image_block(png))
+        content.append(_image_block(_downscale_for_model(png)))
 
     msb = marks_scheme_block(marks_scheme)
     if msb:

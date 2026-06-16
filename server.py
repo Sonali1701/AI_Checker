@@ -201,6 +201,13 @@ async def evaluate(
     except ValueError:
         rate = DEFAULT_USD_TO_INR
 
+    # Server-enforced (not user-toggled): Mathpix is always on when a key is configured,
+    # and every run is logged when a service account is configured. Cost is still computed
+    # for the log even though the dashboard no longer shows it.
+    from sheets_log import has_service_account
+    use_mathpix_eff = bool(os.environ.get("MATHPIX_APP_KEY"))
+    log_eff = has_service_account()
+
     cfg = _cfg_from_form(provider, model, api_key)
     job_id = uuid.uuid4().hex
     with _LOCK:
@@ -211,8 +218,8 @@ async def evaluate(
         job_id=job_id, qp_bytes=qp_bytes, qp_name=question_paper.filename,
         ak_bytes=ak_bytes, ak_name=ak_name, key_source=key_source, rubric_text=rubric_text,
         items=items, sheets=sheets, cfg=cfg, student_class=student_class or None,
-        subject=subject or None, use_mathpix=_truthy(use_mathpix), rate=rate,
-        log_to_sheet=_truthy(log_to_sheet), sheet_id=sheet_id.strip(), sheet_tab=sheet_tab.strip(),
+        subject=subject or None, use_mathpix=use_mathpix_eff, rate=rate,
+        log_to_sheet=log_eff, sheet_id=sheet_id.strip(), sheet_tab=sheet_tab.strip(),
     )
     background_tasks.add_task(_run_job, payload)
     return {"job_id": job_id}

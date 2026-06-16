@@ -13,6 +13,7 @@ from grader import (
     MarksScheme,
     MARKS_SCHEME_PROMPT,
     RUBRIC_GEN_PROMPT,
+    _downscale_for_model,
     _reconcile_report,
     build_system_prompt,
     exam_context_block,
@@ -152,13 +153,13 @@ def grade_answer_sheet(
         parts.append(_text_part(ctx))
     parts.append(_text_part("=== QUESTION PAPER ==="))
     for png in question_paper_pngs:
-        parts.append(_image_part(png))
+        parts.append(_image_part(_downscale_for_model(png)))
 
     parts.append(_text_part("=== ANSWER KEY / MARKING SCHEME ==="))
     if answer_key_text:
         parts.append(_text_part(answer_key_text))
     for png in (answer_key_pngs or []):
-        parts.append(_image_part(png))
+        parts.append(_image_part(_downscale_for_model(png)))
 
     msb = marks_scheme_block(marks_scheme)
     if msb:
