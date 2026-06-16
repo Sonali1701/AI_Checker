@@ -1313,10 +1313,15 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             _draw_cross(fpg, fx, fy, size=24, seed=seed + "x0")
     else:
         # Single mark question: draw one tick (or cross) where the answer ends.
-        # The band can cross a page break, so derive the page from the line we
-        # actually mark — NOT the band's first page (used for the strip below).
+        # Keep the mark on the question's OWN page: when a student answers out of order,
+        # a question's band can bleed onto a LATER page that actually holds another
+        # section's answers (e.g. SEC-B on p3, then MCQs on p4) — marking the band's last
+        # line would jump the score onto that unrelated page. Restrict to the first
+        # answer line's page.
         if anchor_lines:
-            last = anchor_lines[-1]
+            first_pg = anchor_lines[0]["page"]
+            same_page = [l for l in anchor_lines if l["page"] == first_pg]
+            last = (same_page or anchor_lines)[-1]
             mark_page = student_doc[last["page"] - 1]
             mcw = _content_width(mark_page)
             y_mark = (last["y0"] + last["y1"]) / 2
