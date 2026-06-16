@@ -1,0 +1,25 @@
+# Render Blueprint for the AI Checker (FastAPI + static frontend).
+# Deploy: push to GitHub, then in Render → New → Blueprint → pick this repo.
+# Render injects $PORT at runtime; uvicorn must bind to it on 0.0.0.0.
+services:
+  - type: web
+    name: ai-checker
+    runtime: python
+    plan: free            # 512 MB RAM; sleeps when idle (cold start ~30-60s). Bump to "starter" for batches.
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # Secrets — set the values in the Render dashboard (sync:false keeps them out of git).
+      # GOOGLE_SERVICE_ACCOUNT_JSON: paste the ENTIRE service-account JSON as one line.
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: MATHPIX_APP_KEY
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

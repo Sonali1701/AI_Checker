@@ -1,0 +1,13 @@
+# Production theme for AI Checker (Physics Wallah brand-leaning indigo).
+[theme]
+primaryColor = "#4F46E5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F4FB"
+textColor = "#171633"
+font = "sans serif"
+
+[server]
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

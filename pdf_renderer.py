@@ -18,10 +18,14 @@ BLACK = (0, 0, 0)
 GREEN = RED
 
 
-# ---------- Cursive / handwritten font for teacher remarks ----------
+# ---------- Kalam font for handwritten remarks & marks ----------
 
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Use Kalam font from project folder
 _CURSIVE_FONT_CANDIDATES = [
+    os.path.join(_PROJECT_DIR, "Kalam-Regular.ttf"),  # Kalam font in project folder
+    os.path.join(_PROJECT_DIR, "kalam_regular.ttf"),  # Alternative lowercase filename
     os.path.join(_PROJECT_DIR, "fonts", "cursive.ttf"),
     "C:\\Windows\\Fonts\\segoesc.ttf",   # Segoe Script (Windows)
     "C:\\Windows\\Fonts\\LHANDW.TTF",    # Lucida Handwriting (Windows)
@@ -34,6 +38,47 @@ for _p in _CURSIVE_FONT_CANDIDATES:
     if os.path.exists(_p):
         _CURSIVE_FONT_FILE = _p
         break
+
+
+def _sanitize_for_pdf(text: str) -> str:
+    """Sanitize text for PDF output, handling special Unicode characters.
+
+    Converts Greek letters and special math symbols to their readable ASCII equivalents
+    to avoid encoding issues in PDF rendering.
+    """
+    if not text:
+        return text
+
+    # Map of special characters that might cause encoding issues
+    replacements = {
+        'α': 'a',      # Greek alpha
+        'β': 'b',      # Greek beta
+        'γ': 'g',      # Greek gamma
+        'δ': 'd',      # Greek delta
+        'ε': 'e',      # Greek epsilon
+        'λ': 'l',      # Greek lambda
+        'π': 'pi',     # Greek pi
+        'σ': 's',      # Greek sigma
+        'θ': 'th',     # Greek theta
+        'ω': 'w',      # Greek omega
+        '±': '+/-',    # Plus-minus
+        '≈': '~',      # Approximately equal
+        '≠': '!=',     # Not equal
+        '≤': '<=',     # Less than or equal
+        '≥': '>=',     # Greater than or equal
+        '√': 'sqrt',   # Square root
+        '∞': 'inf',    # Infinity
+        '∑': 'sum',    # Summation
+        '∫': 'integral',  # Integral
+        '→': '->',     # Arrow
+        '←': '<-',     # Left arrow
+    }
+
+    result = text
+    for char, replacement in replacements.items():
+        result = result.replace(char, replacement)
+
+    return result
 
 
 def _register_cursive_font(page: fitz.Page) -> tuple[str, str | None]:
@@ -79,6 +124,8 @@ def _draw_handwritten_remark(page: fitz.Page, x: float, y: float,
     else:
         fontfile = None
     text = text.strip()
+    # Sanitize text to avoid encoding issues with special characters
+    text = _sanitize_for_pdf(text)
 
     # Width measurement: for a registered TTF, get_text_length needs the
     # fontfile path to look up metrics. For base14 'tiit' it doesn't.
@@ -130,7 +177,12 @@ def _draw_handwritten_remark(page: fitz.Page, x: float, y: float,
             page.insert_text((x, cy), ln, fontsize=size, color=RED,
                              fontname=fontname)
         except Exception:
-            page.insert_text((x, cy), ln, fontsize=size, color=RED, fontname="helv")
+            # Fallback: try with helvetica-bold which has better Unicode support
+            try:
+                page.insert_text((x, cy), ln, fontsize=size, color=RED, fontname="hebo")
+            except Exception:
+                # Final fallback: use helvetica
+                page.insert_text((x, cy), ln, fontsize=size, color=RED, fontname="helv")
         cy += line_gap
     return cy - line_gap
 
@@ -208,8 +260,8 @@ def _draw_cross(page: fitz.Page, x: float, y: float, size: float = 10,
                 seed: str = "") -> None:
     """Hand-drawn red cross centred at (x, y) with tapered strokes."""
     h = size / 2
-    w_fat = max(1.2, size * 0.22)
-    w_thin = max(0.5, size * 0.09)
+    w_fat = max(0.9, size * 0.15)  # Reduced from 0.22
+    w_thin = max(0.3, size * 0.06)  # Reduced from 0.09
     _tapered_stroke(page, [(x - h, y - h), (x + h, y + h)], w_fat, w_thin,
                     seed=seed or f"x1{x:.1f}{y:.1f}")
     _tapered_stroke(page, [(x + h, y - h), (x - h, y + h)], w_fat, w_thin,
@@ -369,6 +421,56 @@ def _draw_hand_circle(page: fitz.Page, cx: float, cy: float,
     _tapered_stroke(page, pts, w_start=1.4, w_end=0.7, seed=seed)
 
 
+def _draw_number_in_circle(page: fitz.Page, x: float, y: float, text: str,
+                           size: float = 11, seed: str = "") -> None:
+    """Draw a number inside a perfect circle with bolder, centered numbers."""
+    # Significantly larger circles with proportional number size
+    is_decimal = "." in text
+    if is_decimal:
+        radius = size * 1.9 + 1.5  # Much larger circle for decimals
+        font_size = size * 1.9  # Much larger font for decimals
+    else:
+        radius = size * 1.8 + 1.5  # Much larger circle for whole numbers
+        font_size = size * 1.8  # Much larger font size
+
+    # Draw circle with thicker border for better visibility
+    page.draw_circle(fitz.Point(x, y), radius, color=RED, width=1.8)
+
+    # Draw the number TRULY centered in the circle.
+    # insert_text positions text by its BASELINE, so we must find the glyph's
+    # actual visual bounding box and shift the baseline so the glyph's center
+    # lands exactly on the circle center (x, y).
+    try:
+        font = fitz.Font("hebo")  # Helvetica-Bold
+        text_width = font.text_length(text, fontsize=font_size)
+
+        # Glyph vertical extent relative to the baseline (y=0).
+        # glyph_bbox returns values already in EM units (fraction of font size),
+        # with +y UP, so y1 is the top of the glyph and y0 the bottom (~0 for digits).
+        y0s, y1s = [], []
+        for ch in text:
+            bb = font.glyph_bbox(ord(ch))
+            y0s.append(bb.y0)
+            y1s.append(bb.y1)
+        # Scale em-unit extents to the actual font size.
+        glyph_top = max(y1s) * font_size     # distance above baseline
+        glyph_bottom = min(y0s) * font_size  # distance above baseline (<=0)
+
+        # Visual center of the glyph measured UPWARD from the baseline.
+        glyph_center_above_baseline = (glyph_top + glyph_bottom) / 2.0
+
+        # In PDF page coords +y is DOWN. We want the glyph's visual center at y.
+        # baseline_y (page) - glyph_center_above_baseline == y  =>
+        baseline_y = y + glyph_center_above_baseline
+
+        page.insert_text((x - text_width / 2, baseline_y), text, fontsize=font_size,
+                        color=RED, fontname="hebo")
+    except Exception:
+        # Fallback to hand-drawn numbers if bold font fails
+        _draw_number(page, x - _number_width(text, font_size) / 2, y + font_size / 2.5, text,
+                     size=font_size, seed=seed + "n")
+
+
 # ----- OCR coordinate translation -----
 
 _HEADER_PREFIXES = ("q.", "q ", "q)")
@@ -378,6 +480,29 @@ _SECTION_PREFIX = "section"
 # line is just a question number, with no answer content. These get a tick
 # dropped on them if not recognised as headers (the "1 on the next page" bug).
 _QHEADER_RE = re.compile(r"^q\s*\.?\s*\d+\s*[).:\-]*$")
+
+# A line that STARTS a (sub-)question block: a "Qn" label FOLLOWED BY a separator
+# — "Q6)", "Q.6", "Q6:", or "Q6) Evaluate ...". Used to trim a neighbouring
+# question's text out of a band (a band runs up to the next question's anchor,
+# so the next question's first line can bleed in). The trailing separator is
+# REQUIRED so genuine equation lines that merely start with "Qn" — e.g. the
+# physics variables "Q1 = 2Q2", "Q1 = mc(T2-T1)", "q1=q2+q3" — are NOT mistaken
+# for a question label and dropped. Bare labels ("Q6") are caught by _QHEADER_RE.
+# The comma is included because these answer sheets label questions "Q1,", "Q2,,".
+_QLABEL_LEAD_RE = re.compile(r"^q\s*\.?\s*\d+\s*[).:,\-]")
+
+# Hindi / Devanagari equivalents so Devanagari sheets get the same header-skipping
+# and band-trimming as English. "प्रश्न" = "question", "प्र." its abbreviation,
+# "खंड"/"खण्ड"/"भाग" = section/part. Devanagari digits ०-९ and the danda "।" act
+# like Western digits and separators. Conservative on purpose: a bare "प्र" is a
+# prefix of ordinary words (प्रकाश "light", प्रकार "type"), so we only treat it as
+# a label when it carries the abbreviation dot/sign or a number/separator —
+# never bare — to avoid trimming or skipping real answer lines.
+_HI_SECTION_PREFIXES = ("खंड", "खण्ड", "भाग")
+# Bare Hindi label occupying a short line: "प्रश्न", "प्रश्न १", "प्र. 2".
+_QHEADER_HI_RE = re.compile(r"^(?:प्रश्न|प्र[.॰])\s*[\d०-९]*\s*[).:।,\-]*$")
+# A line that STARTS a Hindi question block (label + content) — used for trimming.
+_QLABEL_LEAD_HI_RE = re.compile(r"^(?:प्र[.॰]|प्रश्न\s*(?:[\d०-९]|[).:।,\-]))")
 
 # Bare sub-part labels in every common form: "(i)", "i)", "ii.", "a)", "(b)" ...
 # Built from an explicit roman/letter list so we never mis-flag real words that
@@ -423,7 +548,11 @@ def _is_header(text: str) -> bool:
         return True
     if _QHEADER_RE.match(sl):          # bare "Q2", "Q2)", "Q.27)", "Q 1."
         return True
+    if _QHEADER_HI_RE.match(sl):       # bare "प्रश्न", "प्रश्न १", "प्र. 2"
+        return True
     if sl.startswith(_SECTION_PREFIX) and len(sl) <= 14:
+        return True
+    if sl.startswith(_HI_SECTION_PREFIXES) and len(sl) <= 14:
         return True
     if sl in _LABEL_TOKENS:            # "(i)", "i)", "ii.", "a)", "(b)" ...
         return True
@@ -455,6 +584,123 @@ def _reset_remark_bands(doc: fitz.Document) -> None:
 
 def _remark_bands(doc: fitz.Document, page_num: int) -> list[tuple[float, float]]:
     return _REMARK_BANDS.setdefault(id(doc), {}).setdefault(page_num, [])
+
+
+# ---------- Right-hand marks/remarks strip ----------
+#
+# Each student page is widened with a blank white strip on the right. All
+# per-question ticks, scores, and remarks are written there — never on top of
+# the student's writing, and never clipped at the page edge. `_CONTENT_W` records
+# the ORIGINAL (left) content width per page so OCR pixel→PDF mapping still maps
+# onto the writing area, not the widened page. `_STRIP_CURSOR` packs entries
+# top-to-bottom within each page's strip so they never overlap each other.
+STRIP_FRACTION = 0.24        # strip width as a fraction of the original page width
+STRIP_MIN_WIDTH = 175.0      # but never narrower than this (points)
+_STRIP_TOP = 40.0            # first entry starts below the strip header
+_CONTENT_W: dict[tuple[int, int], float] = {}
+_STRIP_CURSOR: dict[int, dict[int, float]] = {}
+
+
+def _content_width(page: fitz.Page) -> float:
+    """Width of the student-writing area (original page width), excluding the
+    right-hand marks strip. Falls back to full page width for un-widened pages."""
+    return _CONTENT_W.get((id(page.parent), page.number + 1), page.rect.width)
+
+
+def _reset_strip_state(doc: fitz.Document) -> None:
+    _STRIP_CURSOR[id(doc)] = {}
+
+
+def _reserve_strip_slot(doc: fitz.Document, page_num: int, y_pref: float,
+                        height: float, page_h: float) -> float:
+    """Reserve a vertical slot of `height` in the strip near y_pref, never above
+    the running cursor (so entries stack without overlap). Returns the top y."""
+    reg = _STRIP_CURSOR.setdefault(id(doc), {})
+    cursor = reg.get(page_num, _STRIP_TOP)
+    y = max(y_pref, cursor)
+    # If it would run off the bottom, pull it up as far as the cursor allows.
+    if y + height > page_h - 8:
+        y = max(cursor, page_h - 8 - height)
+    reg[page_num] = y + height + 6.0
+    return y
+
+
+def _strip_wrap_lines(text: str, max_w: float, size: float,
+                      fontname: str = "helv") -> int:
+    """Count how many wrapped lines `text` needs at width max_w — for height
+    reservation. Measured slightly wide so we over-reserve rather than overlap."""
+    words = text.split()
+    lines, cur = 1, ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if cur and fitz.get_text_length(trial, fontname=fontname, fontsize=size + 1) > max_w:
+            lines += 1
+            cur = w
+        else:
+            cur = trial
+    return lines
+
+
+def _draw_strip_entry(page: fitz.Page, qid: str, awarded: float,
+                      max_score: float, remark: str, y_pref: float,
+                      steps: list[float] | None = None) -> None:
+    """Write one question's verdict in the right-hand strip: the score calculation
+    and the remark. Tick/cross is now drawn directly on the sheet."""
+    doc = page.parent
+    rect = page.rect
+    cw = _content_width(page)
+    x0 = cw + 12.0
+    x1 = rect.width - 8.0
+    max_w = max(110.0, x1 - x0)
+
+    full = max_score > 0 and awarded >= max_score - 1e-6
+    zero = awarded <= 1e-6
+    remark = (remark or "").strip()
+    # Sanitize remark to avoid PDF encoding issues with special characters
+    remark = _sanitize_for_pdf(remark)
+    show_reason = bool(remark) and not full
+
+    def _fmt(v: float) -> str:
+        return str(int(v)) if float(v).is_integer() else f"{v:g}"
+
+    # Show step-by-step calculation if steps are provided
+    if steps and len(steps) > 1:
+        # Show calculation with denominator: 0.5+1=1.5/2
+        calc_txt = "+".join(_fmt(s) for s in steps) + f"={_fmt(awarded)}/{_fmt(max_score)}" if max_score else _fmt(awarded)
+        head = f"{qid}"
+        score_txt = calc_txt
+    else:
+        score_txt = f"{_fmt(awarded)}/{_fmt(max_score)}" if max_score else _fmt(awarded)
+        head = f"{qid}  {score_txt}".strip()
+
+    head_size = 12.0  # Increased from 11.0
+    head_line_h = head_size * 1.4
+    reason_size = 14.5  # Increased from 11.5 for better visibility
+
+    # If we have steps, show calculation on its own line
+    if steps and len(steps) > 1:
+        reason_lines = _strip_wrap_lines(remark, max_w, reason_size) if show_reason else 0
+        block_h = head_line_h * 2 + (reason_lines * reason_size * 1.32 + 8 if show_reason else 0) + 8
+    else:
+        reason_lines = _strip_wrap_lines(remark, max_w, reason_size) if show_reason else 0
+        block_h = head_line_h + (reason_lines * reason_size * 1.32 + 8 if show_reason else 0) + 8
+
+    y = _reserve_strip_slot(doc, page.number + 1, y_pref - head_size, block_h, rect.height)
+
+    # Show question ID and calculation
+    page.insert_text((x0, y + head_size), head, fontsize=head_size,
+                     color=RED, fontname="hebo")
+
+    if steps and len(steps) > 1:
+        page.insert_text((x0, y + head_line_h * 2), score_txt, fontsize=head_size,
+                         color=RED, fontname="hebo")
+        reason_y = y + head_line_h * 2 + reason_size
+    else:
+        reason_y = y + head_line_h + reason_size
+
+    if show_reason:
+        _draw_handwritten_remark(page, x0, reason_y,
+                                 remark, max_width=max_w, size=reason_size)
 
 
 # Per-document, per-page bands of actual INK on the page image (handwriting,
@@ -568,6 +814,8 @@ def _draw_remark_on_band(student_doc: fitz.Document, m, my_lines: list[dict],
     remark = (getattr(m, "remark", "") or "").strip()
     if not remark:
         return
+    # Sanitize remark to avoid PDF encoding issues
+    remark = _sanitize_for_pdf(remark)
     try:
         score = float(getattr(m, "score", 0) or 0)
         max_score = float(getattr(m, "max_score", 0) or 0)
@@ -647,9 +895,12 @@ def _pdf_coords_from_line(
     page: fitz.Page, bbox_px: tuple[float, float, float, float],
     img_w: int, img_h: int,
 ) -> tuple[float, float, float, float]:
-    """Convert pixel bbox on the OCR'd image to PDF coords on the rendered page."""
+    """Convert pixel bbox on the OCR'd image to PDF coords on the rendered page.
+
+    Scales x by the CONTENT width (the original writing area), not the widened
+    page width, so coordinates land on the student's writing — not in the strip."""
     rect = page.rect
-    sx = rect.width / img_w
+    sx = _content_width(page) / img_w
     sy = rect.height / img_h
     x0, y0, x1, y1 = bbox_px
     return (x0 * sx, y0 * sy, x1 * sx, y1 * sy)
@@ -690,6 +941,61 @@ def _draw_text(page: fitz.Page, x: float, y: float, text: str, *, size: float = 
     return y
 
 
+def _draw_bulleted_remarks(page: fitz.Page, x: float, y: float, text: str, *,
+                          size: float = 11, color=BLACK, fontname: str = "helv",
+                          max_width: float = 515) -> float:
+    """Draw remarks as bullet points for the student. Splits by periods and formats nicely."""
+    if not text or not text.strip():
+        return y
+
+    # Replace "the student" with "you" to make it personal for the student
+    text = text.replace("The student", "You").replace("the student", "you")
+
+    # Split text by periods to create bullet points
+    sentences = [s.strip() for s in text.split('.') if s.strip()]
+
+    line_height = size * 1.35
+    indent = 15
+    bullet_x = x + 5
+    bullet_indent = x + indent
+
+    for sentence in sentences:
+        # Add back period if it was removed by split
+        if not sentence.endswith(('?', '!')):
+            sentence = sentence + '.'
+
+        # Word wrap each sentence
+        words = sentence.split()
+        lines_for_sentence = []
+        current_line = ""
+
+        for w in words:
+            trial = (current_line + " " + w).strip()
+            # estimate width (accounting for bullet space)
+            if fitz.get_text_length(trial, fontname=fontname, fontsize=size) > max_width - indent - 5:
+                if current_line:
+                    lines_for_sentence.append(current_line)
+                current_line = w
+            else:
+                current_line = trial
+
+        if current_line:
+            lines_for_sentence.append(current_line)
+
+        # Draw all lines for this sentence, with bullet only on first line
+        for line_idx, line in enumerate(lines_for_sentence):
+            if line_idx == 0:
+                # First line of sentence gets the bullet
+                page.insert_text((bullet_x, y), "•", fontsize=size, color=color, fontname=fontname)
+                page.insert_text((bullet_indent, y), line, fontsize=size, color=color, fontname=fontname)
+            else:
+                # Continuation lines are indented to match first line
+                page.insert_text((bullet_indent, y), line, fontsize=size, color=color, fontname=fontname)
+            y += line_height
+
+    return y
+
+
 def _cover_page(doc: fitz.Document, report: GradeReport) -> None:
     page = doc.new_page(width=595, height=842)  # A4
     # EVALUATED banner
@@ -703,10 +1009,10 @@ def _cover_page(doc: fitz.Document, report: GradeReport) -> None:
         fontsize=24, color=RED, fontname="hebo",
     )
 
-    # Remarks
+    # Remarks (formatted as bullet points for the student)
     y = 220
     page.insert_text((40, y), "Remarks:", fontsize=14, color=BLACK, fontname="hebo")
-    y = _draw_text(page, 40, y + 22, report.overall_remarks, size=12, color=BLACK, max_width=515)
+    y = _draw_bulleted_remarks(page, 40, y + 22, report.overall_remarks, size=11, color=BLACK, max_width=515)
 
     # Section breakdown
     y += 30
@@ -762,10 +1068,306 @@ def _is_synthetic_anchor(pl: dict) -> bool:
 
 
 def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
+                            by_lid: dict[str, dict],
+                            placed_by_page: dict[int, list[float]] | None = None) -> None:
+    """Write this question's verdict: step marks on the sheet for numerical problems,
+    and calculation/remark in the right-hand marks strip.
+
+    `placed_by_page` is a SHARED page->[y] registry of marks already drawn by EARLIER
+    questions, so marks from different questions on the same page (e.g. a dense MCQ
+    block) stagger vertically instead of piling on top of each other."""
+    if placed_by_page is None:
+        placed_by_page = {}
+    aw = float(getattr(m, "score", 0) or 0)
+    mx = float(getattr(m, "max_score", 0) or 0)
+    remark = (getattr(m, "remark", "") or "").strip()
+    qid = str(getattr(m, "qid", "") or "").strip()
+
+    # Collect criteria for step-by-step marking
+    criteria = list(getattr(m, "criteria", []) or [])
+    steps = [float(getattr(c, "awarded", 0) or 0) for c in criteria] if criteria else []
+
+    # A band runs up to the NEXT question's anchor, so the next question's first
+    # line can bleed in (e.g. "Q6) Evaluate ... = 8..."). Keep THIS question's
+    # own first line, but truncate at the next question's label so neither the
+    # numerical test nor step placement is contaminated by a neighbour.
+    own_lines: list[dict] = []
+    for i, pl in enumerate(my_lines):
+        t = (pl.get("text") or "").strip().lower()
+        if i > 0 and (_QHEADER_RE.match(t) or _QLABEL_LEAD_RE.match(t)
+                      or _QLABEL_LEAD_HI_RE.match(t)):
+            break
+        own_lines.append(pl)
+    my_lines = own_lines
+
+    # Decide whether this question earns per-step marks on the sheet.
+    #
+    # A teacher ticks each step of a NUMERICAL / multi-step solution AND each
+    # point of an ENUMERATED / labelled-diagram answer ("state 4 causes",
+    # "label the parts"), but gives a SINGLE tick + total on flowing prose (an
+    # essay, a history explanation). The grader can declare this per question
+    # via `mark_style`; when it leaves it "auto" we infer from the content.
+    band_text = " ".join((pl.get("text") or "") for pl in my_lines)
+    digits = sum(ch.isdigit() for ch in band_text)
+    letters = sum(ch.isalpha() for ch in band_text)
+    # Math symbols are the reliable signal. The digit fallback requires the
+    # digits to be DENSE (a real calculation), not just a few years in prose —
+    # otherwise a history answer citing 1857, 1947, 1950… reads as "numerical"
+    # and gets over-marked.
+    looks_numerical = (
+        any(sym in band_text for sym in
+            ("=", "→", "⇒", "×", "÷", "√", "^", "∴", "Ω", "Rs", "%"))
+        or (digits >= 6 and digits >= 0.18 * (digits + letters))
+    )
+    real = [pl for pl in my_lines if not _is_header(pl.get("text") or "")]
+    anchor_lines = real or my_lines
+
+    mark_style = str(getattr(m, "mark_style", "auto") or "auto").strip().lower()
+    if mark_style == "per_step":
+        base_step = len(criteria) > 1            # numerical OR enumerated points
+    elif mark_style in ("single", "whole"):
+        base_step = False                        # flowing prose — one tick + total
+    else:                                        # "auto": infer from the content
+        base_step = len(criteria) > 1 and looks_numerical
+    # Need somewhere to place the per-step marks; with no anchor lines fall back
+    # to the single-mark branch (which handles the empty band via y_fraction).
+    use_step_marks = base_step and bool(anchor_lines)
+
+    # When the whole question scored 0 AND the model already wrote a margin
+    # remark, skip the per-step crosses — the cursive remark conveys it and a
+    # column of crosses just looks like litter (a teacher crosses once).
+    suppress_zero_crosses = aw <= 1e-6 and remark != ""
+
+    if not anchor_lines:
+        page_num = max(1, min(int(getattr(m, "page", 1) or 1), len(student_doc)))
+        y_last = float(getattr(m, "y_fraction", 0.1) or 0.1) * student_doc[page_num - 1].rect.height
+        x_end = 200.0
+        page = student_doc[page_num - 1]
+    else:
+        page_num = anchor_lines[0]["page"]
+        page = student_doc[page_num - 1]
+
+    rect = page.rect
+    cw = _content_width(page)
+    seed = f"{qid}|mark"
+
+    # For step-marked problems (numerical work OR enumerated points / labelled
+    # diagrams): tick EACH step/point on the sheet where the student earned it —
+    # with the marks for that step circled right after — exactly like a teacher
+    # going down a solution. A question's band can span several pages, so every
+    # step is resolved and drawn page-by-page.
+    if use_step_marks:
+        # Candidate lines for step ticks: the band's real (non-header) lines,
+        # ordered top-to-bottom across pages. Fall back to all band lines if the
+        # band is somehow header-only.
+        real_band = sorted(
+            (pl for pl in my_lines if not _is_header(pl.get("text") or "")),
+            key=lambda r: (r["page"], r["y0"], r["x0"]),
+        )
+        candidates = real_band or sorted(
+            my_lines, key=lambda r: (r["page"], r["y0"], r["x0"]))
+
+        # Stage 1: honour an explicit step_line_id when it points at a real line
+        # inside this band — on ANY page of the band, not just the first.
+        band_lids = {pl["lid"] for pl in my_lines}
+        assigned: dict[int, dict] = {}
+        unassigned: list[int] = []
+        for ci, c in enumerate(criteria):
+            lid = (getattr(c, "step_line_id", "") or "").strip()
+            pl = by_lid.get(lid)
+            if pl is not None and lid in band_lids and not _is_header(pl.get("text") or ""):
+                assigned[ci] = pl
+            else:
+                unassigned.append(ci)
+
+        # Stage 2: spread the unanchored steps evenly down the band so each step
+        # lands on its own line instead of all piling onto the last one.
+        if unassigned and candidates:
+            n = len(unassigned)
+            for k, ci in enumerate(unassigned):
+                idx = min(int((k + 0.5) * len(candidates) / n), len(candidates) - 1)
+                assigned[ci] = candidates[idx]
+
+        # Stage 3: if two steps resolved to the same line, push the later one to
+        # the next free real line so ticks never stack on top of each other.
+        used_lids: set[str] = set()
+        for ci in sorted(assigned, key=lambda c: (assigned[c]["page"], assigned[c]["y0"])):
+            pl = assigned[ci]
+            if pl["lid"] in used_lids:
+                later = [p for p in candidates
+                         if (p["page"], p["y0"]) >= (pl["page"], pl["y0"])
+                         and p["lid"] not in used_lids]
+                if later:
+                    pl = later[0]
+                    assigned[ci] = pl
+            used_lids.add(pl["lid"])
+
+        # Group the assigned criteria BY their resolved line. Several steps that
+        # land on the same line (e.g. a 5-mark answer written on one line, or two
+        # steps the OCR merged) become ONE tick + the COMBINED marks for that
+        # line — a teacher ticks a line once, not five times on top of itself.
+        groups: dict[str, dict] = {}
+        for ci in assigned:
+            pl = assigned[ci]
+            g = groups.get(pl["lid"])
+            if g is None:
+                g = {"pl": pl, "awarded": 0.0, "max": 0.0}
+                groups[pl["lid"]] = g
+            g["awarded"] += float(getattr(criteria[ci], "awarded", 0) or 0)
+            g["max"] += float(getattr(criteria[ci], "max", 0) or 0)
+
+        # Stage 4: draw one mark per line, on its OWN page, nudging down on the
+        # rare occasion two lines' marks would still overlap vertically. Share the
+        # cross-question registry so step marks don't collide with other questions'.
+        drawn_by_page = placed_by_page
+        ordered_groups = sorted(
+            groups.values(), key=lambda g: (g["pl"]["page"], g["pl"]["y0"]))
+        for gi, g in enumerate(ordered_groups):
+            pl = g["pl"]
+            awarded = g["awarded"]
+            max_step = g["max"]
+            if awarded <= 1e-6 and (max_step <= 0 or suppress_zero_crosses):
+                continue  # nothing earned and the remark already explains it
+
+            pg = student_doc[pl["page"] - 1]
+            cwp = _content_width(pg)
+            sstep = f"{seed}|g{gi}"
+
+            # Find a vertical slot >= 30pt from every mark already on this page,
+            # preferring the step's own line. Search downward first; if the page
+            # tail is full, search back upward — never clamp several marks onto
+            # the same y (overprint) or off the page (draws nothing).
+            ceiling = pg.rect.height - 20
+            floor_y = 24.0
+            placed = drawn_by_page.setdefault(pl["page"], [])
+            y_mark = max(floor_y, min((pl["y0"] + pl["y1"]) / 2, ceiling))
+
+            def _collides(yy: float) -> bool:
+                return any(abs(yy - py) < 30 for py in placed)
+
+            if _collides(y_mark):
+                down = y_mark
+                while down <= ceiling and _collides(down):
+                    down += 36
+                if down <= ceiling:
+                    y_mark = down
+                else:
+                    up = y_mark
+                    while up >= floor_y and _collides(up):
+                        up -= 36
+                    y_mark = max(floor_y, up)
+            placed.append(y_mark)
+
+            # Size the circle to the EXACT text first — _draw_number_in_circle
+            # uses a larger radius for decimals (half marks like "0.5") — then
+            # reserve the tick+circle cluster from that true width.
+            mark_text = (str(int(awarded)) if float(awarded).is_integer()
+                         else f"{awarded:g}")
+            is_dec = "." in mark_text
+            tick_size = 20
+            circle_size = 8
+            circle_r = circle_size * (1.9 if is_dec else 1.8) + 1.5
+            cluster_w = tick_size * 1.5 + 6 + circle_r * 2
+
+            # Place the tick just past where the writing ends, but never let the
+            # cluster cross the right edge onto the marks strip: the right cap
+            # wins over the left floor when the line itself starts far right.
+            right_cap = cwp - 6 - cluster_w
+            tick_x = min(pl["x1"] + 12 + _wobble(sstep, 0, amp=5), right_cap)
+            floor = pl["x0"] + 2
+            tick_x = max(floor, tick_x) if floor <= right_cap else right_cap
+            tick_x = max(2.0, tick_x)
+
+            if awarded > 0:
+                _draw_tick(pg, tick_x, y_mark, size=tick_size, seed=sstep + "t")
+                mark_x = tick_x + tick_size * 1.5 + circle_r + 6
+                _draw_number_in_circle(pg, mark_x, y_mark, mark_text,
+                                       size=circle_size, seed=sstep)
+            else:
+                # Line attempted but earned nothing — cross it like a teacher.
+                _draw_cross(pg, tick_x, y_mark, size=tick_size, seed=sstep + "x")
+    else:
+        # Single mark question: draw one tick (or cross) where the answer ends.
+        # The band can cross a page break, so derive the page from the line we
+        # actually mark — NOT the band's first page (used for the strip below).
+        if anchor_lines:
+            last = anchor_lines[-1]
+            mark_page = student_doc[last["page"] - 1]
+            mcw = _content_width(mark_page)
+            y_mark = (last["y0"] + last["y1"]) / 2
+            x_end = last["x1"]
+            mark_page_num = last["page"]
+        else:
+            mark_page = page
+            mcw = cw
+            y_mark = float(getattr(m, "y_fraction", 0.1) or 0.1) * rect.height
+            x_end = 200.0
+            mark_page_num = page_num
+
+        # Stagger vertically against every mark already placed on this page (across
+        # ALL questions) so dense pages — e.g. the MCQ block — never overlap.
+        placed = placed_by_page.setdefault(mark_page_num, [])
+        ceiling = mark_page.rect.height - 20
+        floor_y = 24.0
+        y_mark = max(floor_y, min(y_mark, ceiling))
+
+        def _coll(yy: float) -> bool:
+            return any(abs(yy - py) < 26 for py in placed)
+
+        if _coll(y_mark):
+            down = y_mark
+            while down <= ceiling and _coll(down):
+                down += 30
+            if down <= ceiling:
+                y_mark = down
+            else:
+                up = y_mark
+                while up >= floor_y and _coll(up):
+                    up -= 30
+                y_mark = max(floor_y, up)
+        placed.append(y_mark)
+
+        # OBJECTIVE questions (MCQ / assertion-reason / match): a single tick
+        # (correct) or cross (wrong) — NO circled number. The score is shown in the
+        # clean right-hand MARKS column, so dense MCQ pages don't pile up numbers.
+        is_obj = bool(str(getattr(m, "correct_option", "") or "").strip())
+        if is_obj:
+            tick_size = 26
+            tick_x = max(2.0, min(x_end + 16, mcw - 6 - tick_size * 1.6))
+            attempted = bool(str(getattr(m, "chosen_option", "") or "").strip())
+            if aw >= mx and mx > 0:
+                _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+            elif attempted:
+                _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+            # unattempted → nothing inline (the margin column says "Unattempted")
+        else:
+            tick_size = 32
+            # Reserve the tick+circle cluster so it never spills onto the strip.
+            circle13_r = 13 * (1.8 if float(aw).is_integer() else 1.9) + 1.5
+            cluster_w = tick_size * 1.7 + circle13_r
+            tick_x = max(2.0, min(x_end + 20, mcw - 6 - cluster_w))
+            if aw <= 1e-6:  # Zero marks - only draw cross, no circle
+                _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+            else:  # Positive marks - draw tick and circled mark
+                _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+                circle_x = tick_x + tick_size * 1.7
+                _draw_number_in_circle(mark_page, circle_x, y_mark,
+                                      str(int(aw)) if float(aw).is_integer() else f"{aw:g}",
+                                      size=13, seed=seed + "c")  # Increased size to 13
+
+    # Show calculation/remark in the strip. Only show the per-step breakdown
+    # ("1+1=2/2") when this question was actually marked step-by-step on the
+    # sheet — otherwise (descriptive / empty band) show the plain score so the
+    # strip never advertises steps the sheet doesn't show.
+    y_strip = (anchor_lines[0]["y0"] + anchor_lines[0]["y1"]) / 2 if anchor_lines else rect.height * 0.5
+    _draw_strip_entry(page, qid, aw, mx, remark, y_strip,
+                      steps=steps if (use_step_marks and len(steps) > 1) else None)
+    return
+
+
+def _render_question_marks_LEGACY(student_doc: fitz.Document, m, my_lines: list[dict],
                             by_lid: dict[str, dict]) -> None:
-    """Render one question's criteria (ticks + cumulative numbers) across
-    however many pages its band covers. my_lines is already filtered to this
-    question's band and may span multiple pages."""
+    """Deprecated inline placement (kept for reference; no longer called)."""
     criteria = list(getattr(m, "criteria", []) or [])
 
     # Inject synthetic diagram anchors so criteria without a real OCR line
@@ -1115,6 +1717,10 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
 
     qs_sorted = sorted(questions, key=q_anchor)
 
+    # Shared page->[y] registry so marks from DIFFERENT questions on the same page
+    # (the MCQ block especially) stagger vertically instead of overlapping.
+    placed_by_page: dict[int, list[float]] = {}
+
     for qi, q in enumerate(qs_sorted):
         start_page, start_y = q_anchor(q)
         if qi + 1 < len(qs_sorted):
@@ -1135,7 +1741,7 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
                     continue
                 my_lines.append(pl)
 
-        _render_question_marks(student_doc, q, my_lines, by_lid)
+        _render_question_marks(student_doc, q, my_lines, by_lid, placed_by_page)
 
 
 def _annotate_student_page(page: fitz.Page, marks_on_page: list,
@@ -1369,10 +1975,17 @@ def _annotate_student_page(page: fitz.Page, marks_on_page: list,
 
 def _draw_inline_annotations(page: fitz.Page, annotations: list,
                              line_index: dict | None = None) -> None:
-    """Draw ✗ marks and strikethroughs — uses OCR line bboxes when available, else fractions."""
+    """Mark wrong words ON the student's writing: ✗ for objective slips, and a
+    strikethrough through the offending word/phrase. `circle` annotations are
+    rendered as strikethroughs too (a circle over busy handwriting reads as
+    clutter; a line through the wrong word is clearer)."""
     rect = page.rect
+    cw = _content_width(page)  # writing-area width (exclude the marks strip)
     line_index = line_index or {}
     for a in annotations:
+        # Treat circle like strikethrough — strike the wrong word instead of
+        # ringing it.
+        is_strike = a.type in ("strikethrough", "circle")
         x = y = None
         width = None
         if a.target_line_id and a.target_line_id in line_index:
@@ -1382,43 +1995,26 @@ def _draw_inline_annotations(page: fitz.Page, annotations: list,
             if a.target_word and a.target_word in line_text:
                 x = _word_x_in_line(line_text, a.target_word, x0, x1)
                 # strikethrough width sized to the target word
-                if a.type == "strikethrough":
+                if is_strike:
                     word_frac = len(a.target_word) / max(1, len(line_text))
                     width = max(15.0, word_frac * (x1 - x0))
                     # re-center start at left edge of word
                     x = x - width / 2
             else:
                 x = (x0 + x1) / 2
-                if a.type == "strikethrough":
+                if is_strike:
                     width = x1 - x0
                     x = x0
         else:
-            x = a.x_fraction * rect.width
+            x = a.x_fraction * cw
             y = a.y_fraction * rect.height
-            width = max(20.0, a.width_fraction * rect.width) if a.type == "strikethrough" else None
+            width = max(20.0, a.width_fraction * cw) if is_strike else None
 
         seed = f"a{a.page}{a.target_word or ''}{x:.1f}{y:.1f}"
         if a.type == "cross":
             size = 11 + _wobble(seed, 0, amp=2.5)
             _draw_cross(page, x, y, size=size, seed=seed)
-        elif a.type == "circle":
-            # Size circle to the target word/phrase if we have line bbox info,
-            # else fall back to a medium oval.
-            if a.target_line_id and a.target_line_id in line_index:
-                _, bbox_px, img_w, img_h, line_text = line_index[a.target_line_id]
-                x0, y0, x1, y1 = _pdf_coords_from_line(page, bbox_px, img_w, img_h)
-                line_h = max(8.0, (y1 - y0))
-                if a.target_word and a.target_word in line_text:
-                    word_frac = len(a.target_word) / max(1, len(line_text))
-                    rx = max(14.0, word_frac * (x1 - x0) * 0.7)
-                else:
-                    rx = max(20.0, (x1 - x0) * 0.15)
-                ry = line_h * 0.75
-            else:
-                rx = max(22.0, a.width_fraction * rect.width * 0.5)
-                ry = rx * 0.55
-            _draw_hand_circle(page, x, y, rx=rx, ry=ry, seed=seed)
-        elif a.type == "strikethrough":
+        else:  # strikethrough or circle
             _draw_strikethrough(page, x, y, width or 40.0)
 
 
@@ -1491,6 +2087,27 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
             pdf_page = student_doc.new_page(width=rect.width, height=rect.height)
             pdf_page.insert_image(rect, stream=png)
             img.close()
+
+    # Widen every student page with a blank right-hand strip for the marks and
+    # remarks. The original page goes on the left (its width recorded as the
+    # content width so OCR coords still map onto the writing); the strip carries
+    # all ticks/scores/remarks so they never sit on the writing or run off-page.
+    _CONTENT_W.clear()
+    widened = fitz.open()
+    for pno in range(len(student_doc)):
+        src = student_doc[pno]
+        w, h = src.rect.width, src.rect.height
+        strip = max(STRIP_MIN_WIDTH, w * STRIP_FRACTION)
+        npage = widened.new_page(width=w + strip, height=h)
+        npage.show_pdf_page(fitz.Rect(0, 0, w, h), student_doc, pno)
+        # Divider line + a small header at the top of the strip.
+        npage.draw_line(fitz.Point(w, 0), fitz.Point(w, h), color=RED, width=1.0)
+        npage.insert_text((w + 12, 24), "MARKS / REMARKS", fontsize=8.5,
+                          color=RED, fontname="hebo")
+        _CONTENT_W[(id(widened), pno + 1)] = w
+    student_doc.close()
+    student_doc = widened
+    _reset_strip_state(student_doc)
 
     # Group marks and annotations by page
     by_page: dict[int, list] = {}

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Checker — Handwritten Grader</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <!-- Brand hero -->
+    <header class="hero">
+      <div class="badge">PW</div>
+      <div>
+        <h1>AI Checker</h1>
+        <p>Automated handwritten answer-sheet evaluation</p>
+      </div>
+      <button id="settingsToggle" class="ghost-btn" type="button">⚙️ Settings</button>
+    </header>
+
+    <!-- Settings (optional / admin) -->
+    <section id="settings" class="card settings hidden">
+      <p class="sub">Optional. On a deployed server the API key is configured for you — leave it blank.</p>
+      <div class="grid2">
+        <label>AI provider
+          <select id="provider">
+            <option value="gemini" selected>Gemini (Google)</option>
+            <option value="claude">Claude (Anthropic)</option>
+          </select>
+        </label>
+        <label>Model
+          <select id="model"></select>
+        </label>
+        <label id="apiKeyWrap">API key <span class="hint" id="keyHint"></span>
+          <input id="apiKey" type="password" placeholder="leave blank to use server key" />
+        </label>
+        <label>USD → INR
+          <input id="usdInr" type="number" step="0.5" value="94" />
+        </label>
+      </div>
+      <div class="grid2">
+        <label class="chk"><input id="useMathpix" type="checkbox" /> Use Mathpix OCR (precise tick placement)</label>
+        <label>Mathpix app_key
+          <input id="mathpixKey" type="password" placeholder="optional" />
+        </label>
+        <label class="chk"><input id="logSheet" type="checkbox" /> Log each run to Google Sheet</label>
+        <label>Worksheet/tab (blank = first)
+          <input id="sheetTab" type="text" placeholder="optional" />
+        </label>
+      </div>
+    </section>
+
+    <!-- Step 1 -->
+    <section class="card">
+      <div class="step"><span class="n">1</span><span class="t">Exam details</span></div>
+      <p class="sub">Grading is calibrated to the class level and subject conventions.</p>
+      <div class="grid2">
+        <label>Class / Grade<input id="studentClass" type="text" placeholder="e.g. Class 10" /></label>
+        <label>Subject<input id="subject" type="text" placeholder="e.g. Social Science" /></label>
+      </div>
+    </section>
+
+    <!-- Step 2 -->
+    <section class="card">
+      <div class="step"><span class="n">2</span><span class="t">Upload files</span></div>
+      <p class="sub">One question paper, and any number of student answer sheets to grade against it — add them all at once or a few at a time.</p>
+      <div class="grid2">
+        <label>Question paper (PDF/PNG/JPG)
+          <input id="qpFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
+        </label>
+        <div>
+          <span class="lbl">Student answer sheet(s)</span>
+          <div id="dropzone" class="dropzone">
+            <input id="saFiles" type="file" accept=".pdf,.png,.jpg,.jpeg" multiple hidden />
+            <p>📄 <b>Drag &amp; drop</b> answer sheets here, or <button id="pickSheets" type="button" class="link-btn">browse</button></p>
+            <p class="dz-hint">PDF / PNG / JPG · one per student · select many for batch</p>
+          </div>
+        </div>
+      </div>
+      <div id="sheetListWrap" class="sheetlist-wrap hidden">
+        <div class="sheetlist-head">
+          <b id="sheetCount">0 sheets</b>
+          <button id="clearSheets" type="button" class="ghost-btn small">Clear all</button>
+        </div>
+        <ul id="sheetList" class="sheetlist"></ul>
+      </div>
+    </section>
+
+    <!-- Step 3 -->
+    <section class="card">
+      <div class="step"><span class="n">3</span><span class="t">Answer key</span></div>
+      <p class="sub">Upload a marking scheme, or let AI draft one from the question paper.</p>
+      <div class="radios">
+        <label><input type="radio" name="keySource" value="upload" checked /> Upload answer key / rubric file</label>
+        <label><input type="radio" name="keySource" value="rubric" /> Generate a rubric with AI</label>
+      </div>
+      <div id="keyUpload">
+        <input id="akFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
+      </div>
+      <div id="keyRubric" class="hidden">
+        <button id="genRubric" class="ghost-btn" type="button">✨ Generate rubric from question paper</button>
+        <textarea id="rubricText" rows="10" placeholder="The generated rubric appears here. Edit freely — this is what the grader uses."></textarea>
+      </div>
+    </section>
+
+    <!-- Step 4 -->
+    <section class="card">
+      <div class="step"><span class="n">4</span><span class="t">Maximum marks (denominator)</span></div>
+      <p class="sub">Read from the printed “[N Marks]” tags, then locked — every student is scored out of the same total.</p>
+      <button id="detectMarks" class="ghost-btn" type="button">🔢 Detect max marks from question paper</button>
+      <div id="marksMethod" class="muted"></div>
+      <table id="marksTable" class="marks hidden">
+        <thead><tr><th>Question / part</th><th>Max</th><th>What it is</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="marksFooter" class="hidden">
+        <button id="addMark" class="ghost-btn small" type="button">+ Add row</button>
+        <span class="locked">🔒 Locked total: <b id="lockedTotal">0</b></span>
+      </div>
+    </section>
+
+    <!-- Step 5 -->
+    <section class="card">
+      <div class="step"><span class="n">5</span><span class="t">Evaluate</span></div>
+      <ul id="checklist" class="checklist"></ul>
+      <button id="evaluate" class="primary-btn" type="button" disabled>🚀 Evaluate</button>
+      <div id="progress" class="progress hidden">
+        <div class="bar"><div id="barFill" class="fill"></div></div>
+        <div id="progressText" class="muted"></div>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section id="results" class="card hidden">
+      <div class="results-head">
+        <h2 id="resultsTitle">Results</h2>
+        <div>
+          <a id="zipBtn" class="primary-btn small hidden" href="#">⬇️ Download all (ZIP)</a>
+          <button id="newBatch" class="ghost-btn small" type="button">🔄 New</button>
+        </div>
+      </div>
+      <div id="summary" class="summary"></div>
+      <div id="resultRows"></div>
+    </section>
+
+    <footer class="foot">AI Checker · grading core runs server-side · objective questions scored deterministically</footer>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

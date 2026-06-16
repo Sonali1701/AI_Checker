@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+service_account.json
+*service-account*.json
+*service_account*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local artifacts
+*.output
+
+# Student data / uploads / generated sheets — never commit (PII)
+*.pdf
+
+# Editor/agent state + archives (not needed in the repo)
+.claude/
+*.zip

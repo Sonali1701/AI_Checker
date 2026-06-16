@@ -10,13 +10,17 @@ from google.genai import types
 # produce structurally-identical GradeReport objects.
 from grader import (
     GradeReport,
+    MarksScheme,
+    MARKS_SCHEME_PROMPT,
     RUBRIC_GEN_PROMPT,
+    _reconcile_report,
     build_system_prompt,
     exam_context_block,
+    marks_scheme_block,
 )
 from mathpix import PageOCR, overlay_anchors_on_png
 
-DEFAULT_MODEL = "gemini-2.5-pro"
+DEFAULT_MODEL = "gemini-2.0-flash-exp"
 
 
 def _make_client(api_key: str | None, use_vertex: bool,
@@ -81,6 +85,45 @@ def generate_rubric(
     return resp.text
 
 
+def extract_marks_scheme(
+    question_paper_pngs: list[bytes],
+    model: str = DEFAULT_MODEL,
+    api_key: str | None = None,
+    use_vertex: bool = False,
+    project: str | None = None,
+    location: str | None = None,
+    student_class: str | None = None,
+    subject: str | None = None,
+) -> MarksScheme:
+    """Read the authoritative per-part maximum-marks scheme off the question paper."""
+    client = _make_client(api_key, use_vertex, project, location)
+
+    parts: list[types.Part] = []
+    ctx = exam_context_block(student_class, subject)
+    if ctx:
+        parts.append(_text_part(ctx))
+    parts.append(_text_part("Question paper:"))
+    for png in question_paper_pngs:
+        parts.append(_image_part(png))
+    parts.append(_text_part("Extract the official maximum-marks scheme as described."))
+
+    resp = client.models.generate_content(
+        model=model,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(
+            system_instruction=MARKS_SCHEME_PROMPT,
+            temperature=0,
+            response_mime_type="application/json",
+            response_schema=MarksScheme,
+            max_output_tokens=8000,
+        ),
+    )
+    parsed = getattr(resp, "parsed", None)
+    if not isinstance(parsed, MarksScheme):
+        parsed = MarksScheme.model_validate_json(resp.text)
+    return parsed
+
+
 def grade_answer_sheet(
     question_paper_pngs: list[bytes],
     student_pngs: list[bytes],
@@ -95,6 +138,8 @@ def grade_answer_sheet(
     location: str | None = None,
     student_class: str | None = None,
     subject: str | None = None,
+    marks_scheme: MarksScheme | None = None,
+    usage_out: dict | None = None,
 ) -> GradeReport:
     if not answer_key_pngs and not answer_key_text:
         raise ValueError("Provide either answer_key_pngs or answer_key_text.")
@@ -114,6 +159,10 @@ def grade_answer_sheet(
         parts.append(_text_part(answer_key_text))
     for png in (answer_key_pngs or []):
         parts.append(_image_part(png))
+
+    msb = marks_scheme_block(marks_scheme)
+    if msb:
+        parts.append(_text_part(msb))
 
     overlaid_pngs: list[bytes] = []
     if ocr_pages:
@@ -202,7 +251,24 @@ def grade_answer_sheet(
 
     # Prefer the SDK's pre-parsed object on the last chunk if available; fall
     # back to validating the concatenated JSON ourselves.
+    if usage_out is not None:
+        um = getattr(last_chunk, "usage_metadata", None) if last_chunk is not None else None
+        prompt = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
+        cached = int(getattr(um, "cached_content_token_count", 0) or 0) if um else 0
+        cand = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
+        thoughts = int(getattr(um, "thoughts_token_count", 0) or 0) if um else 0
+        usage_out.update({
+            "provider": "gemini",
+            "model": model,
+            # Gemini's prompt_token_count INCLUDES the cached portion — split it out.
+            "input_tokens": max(0, prompt - cached),
+            "cached_input_tokens": cached,
+            "cache_write_tokens": 0,
+            # Thinking tokens are billed as output.
+            "output_tokens": cand + thoughts,
+        })
+
     parsed = getattr(last_chunk, "parsed", None) if last_chunk is not None else None
     if not isinstance(parsed, GradeReport):
         parsed = GradeReport.model_validate_json(full_text)
-    return parsed
+    return _reconcile_report(parsed, marks_scheme)

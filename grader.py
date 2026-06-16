@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import base64
+import math
+import re
 from io import BytesIO
 from typing import Literal
 
@@ -71,6 +73,41 @@ class QuestionMark(BaseModel):
             "Sum of `awarded` across criteria MUST equal `score`; sum of `max` MUST equal `max_score`."
         ),
     )
+    mark_style: Literal["per_step", "single", "auto"] = Field(
+        default="auto",
+        description=(
+            "How a teacher would physically mark THIS answer on the sheet:\n"
+            "- 'per_step': put a tick + the marks next to EACH step/point individually. Use for "
+            "(a) numerical / calculation answers and multi-step derivations, AND (b) ENUMERATED "
+            "answers where each point sits on its own line — 'state four causes', 'list three "
+            "differences', 'give two examples', fill-in-the-blanks, and LABELLED DIAGRAMS. For these, "
+            "set each criterion's step_line_id to the line (or 'PnDk' diagram region) for that point.\n"
+            "- 'single': ONE tick + the total in the margin, plus a short remark — use for FLOWING "
+            "PROSE: essays, paragraph answers, descriptive English/Hindi/literature answers, and "
+            "history/civics explanations where ticking every sentence would be wrong.\n"
+            "- 'auto' (default): only set this if genuinely unsure; the renderer will infer from the "
+            "content. Prefer to decide explicitly between 'per_step' and 'single'."
+        ),
+    )
+    chosen_option: str = Field(
+        default="",
+        description=(
+            "OBJECTIVE questions ONLY (MCQ, assertion-reason, true/false, match-the-following). "
+            "The single option LETTER the student actually marked, read from the PAGE IMAGE — "
+            "'A', 'B', 'C', or 'D'. Set '' if the student left it blank (unattempted). NEVER read "
+            "this from the OCR transcript (OCR mangles hand-circled letters). Leave '' for "
+            "descriptive (non-objective) questions."
+        ),
+    )
+    correct_option: str = Field(
+        default="",
+        description=(
+            "OBJECTIVE questions ONLY. The correct option LETTER taken from the ANSWER KEY "
+            "('A'/'B'/'C'/'D'). When this is set, the SYSTEM scores the question in code by "
+            "comparing it to `chosen_option` — do NOT decide the score yourself. Leave '' for "
+            "descriptive (non-objective) questions."
+        ),
+    )
 
 
 class Annotation(BaseModel):
@@ -110,6 +147,151 @@ class GradeReport(BaseModel):
         default_factory=list,
         description="Inline marks on the student's pages. Add a 'cross' next to each wrong word in an objective answer (antonyms, synonyms, fill-in-the-blanks, MCQ choices). Add 'strikethrough' for clearly wrong phrases or whole-line errors. Do NOT annotate subjective prose answers — those are handled by the per-question remark.",
     )
+
+
+# ---------- Marks scheme (the authoritative denominator) ----------
+
+class MarksItem(BaseModel):
+    """One gradable sub-part and its maximum marks, read off the question paper."""
+    qid: str = Field(description="Sub-part id: top-level 'Q14'; lettered 'Q16.a'; roman 'Q18.iii'; nested 'Q6.ii.b'.")
+    max: float = Field(description="Maximum marks PRINTED on the paper for THIS sub-part only.")
+    description: str = Field(default="", description="3-6 word label so a teacher recognises the part.")
+
+
+class MarksScheme(BaseModel):
+    """The full per-part maximum-marks breakdown of a paper. Fixed for every student."""
+    total: float = Field(description="Sum of every item's max — the paper's full marks.")
+    items: list[MarksItem] = Field(default_factory=list)
+
+
+def _norm_qid(qid: str | None) -> str:
+    """Loose key for matching qids across formats: 'Q16.a'/'Q16(a)'/'16a' -> '16a'."""
+    s = re.sub(r"[^a-z0-9]", "", (qid or "").lower())
+    return re.sub(r"^q", "", s, count=1)
+
+
+def _top_level_qid(qid: str | None) -> str:
+    """'Q16.a' -> 'Q16', 'Q18.iii' -> 'Q18', 'Q1' -> 'Q1'."""
+    m = re.match(r"\s*[Qq]?\s*(\d+)", qid or "")
+    return f"Q{m.group(1)}" if m else (qid or "Q?")
+
+
+def marks_scheme_block(marks_scheme: "MarksScheme | None") -> str:
+    """Format the authoritative marks scheme for injection into the grading prompt."""
+    if not marks_scheme or not marks_scheme.items:
+        return ""
+    lines = [
+        "=== OFFICIAL MAXIMUM MARKS (AUTHORITATIVE — DO NOT CHANGE) ===",
+        "These max marks are fixed by the question paper and are IDENTICAL for every student.",
+        "Produce EXACTLY these sub-parts in `questions`, each with `max_score` equal to the value here,",
+        "and grade each one SEPARATELY. An unattempted part scores 0 but KEEPS its max and must still",
+        "appear. The grand total max is the sum below and never changes.",
+        "",
+    ]
+    for it in marks_scheme.items:
+        d = f" — {it.description}" if it.description else ""
+        lines.append(f"  {it.qid}: max {it.max:g}{d}")
+    total = sum(float(it.max) for it in marks_scheme.items)
+    lines.append(f"  TOTAL: {total:g}")
+    return "\n".join(lines)
+
+
+def _norm_opt(s: str) -> str:
+    """Normalise an option letter to a single uppercase A–D (or ''), so a hand-written
+    '(b)' / 'B.' / 'option B' all compare equal. Used for deterministic MCQ scoring."""
+    m = re.search(r"[A-Da-d]", str(s or ""))
+    return m.group(0).upper() if m else ""
+
+
+def _snap_half(x: float) -> float:
+    """Round to the nearest 0.5 — school marks come in half-mark steps, never 0.25/4.25."""
+    try:
+        return math.floor(float(x) * 2 + 0.5) / 2
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _reconcile_report(report: GradeReport, marks_scheme: "MarksScheme | None" = None) -> GradeReport:
+    """Make the report internally consistent and lock the denominator to the scheme.
+
+    1. Parts define the whole: a question's score/max are the sums of its criteria.
+    2. When a marks scheme is supplied it is authoritative — override each matched
+       question's max_score, and append any sub-part the model dropped (as 0/max,
+       flagged for the teacher) so the denominator can never come out short.
+    3. Recompute every total (and section_totals) from the per-question source of
+       truth, so the cover page, the app summary, and the page marks all agree.
+    """
+    for q in report.questions:
+        # Objective questions are scored deterministically below (after the max is
+        # finalised) — skip the criteria maths for them here.
+        if _norm_opt(getattr(q, "correct_option", "")):
+            continue
+        if q.criteria:
+            for c in q.criteria:                       # half-mark steps only
+                c.awarded = _snap_half(c.awarded)
+            q.score = round(sum(float(c.awarded) for c in q.criteria), 4)
+            q.max_score = round(sum(float(c.max) for c in q.criteria), 4)
+        else:
+            q.score = _snap_half(q.score)
+
+    if marks_scheme and marks_scheme.items:
+        canon = {_norm_qid(it.qid): it for it in marks_scheme.items}
+        seen: set[str] = set()
+        for q in report.questions:
+            n = _norm_qid(q.qid)
+            if n in canon:
+                q.max_score = float(canon[n].max)
+                seen.add(n)
+        for n, it in canon.items():
+            if n not in seen:
+                report.questions.append(QuestionMark(
+                    qid=it.qid, score=0.0, max_score=float(it.max),
+                    page=1, y_fraction=0.5, remark="[not graded — verify]",
+                ))
+
+    for q in report.questions:
+        q.max_score = max(0.0, float(q.max_score))
+        correct = _norm_opt(getattr(q, "correct_option", ""))
+        if correct:
+            # OBJECTIVE: score in CODE by comparing the chosen letter to the key —
+            # never by the model's judgement. A correct option can't be marked wrong,
+            # and grading is identical for every student.
+            chosen = _norm_opt(getattr(q, "chosen_option", ""))
+            q.criteria = []
+            q.mark_style = "single"
+            if not chosen:
+                q.score = 0.0
+                q.remark = "Unattempted"
+            elif chosen == correct:
+                q.score = q.max_score
+                q.remark = ""
+            else:
+                q.score = 0.0
+                q.remark = f"Incorrect option (chose {chosen}, correct {correct})"
+        else:
+            q.score = min(max(0.0, float(q.score)), q.max_score)
+
+    report.total_score = round(sum(q.score for q in report.questions), 2)
+    if marks_scheme and marks_scheme.items:
+        report.max_total = round(sum(float(it.max) for it in marks_scheme.items), 2)
+    else:
+        report.max_total = round(sum(q.max_score for q in report.questions), 2)
+
+    sec: dict[str, dict] = {}
+    order: list[str] = []
+    for q in report.questions:
+        top = _top_level_qid(q.qid)
+        if top not in sec:
+            sec[top] = {"qid": top, "score": 0.0, "max_score": 0.0}
+            order.append(top)
+        sec[top]["score"] += q.score
+        sec[top]["max_score"] += q.max_score
+    report.section_totals = [
+        {"qid": sec[t]["qid"], "score": round(sec[t]["score"], 2),
+         "max_score": round(sec[t]["max_score"], 2)}
+        for t in order
+    ]
+    return report
 
 
 # ---------- Helpers ----------
@@ -188,6 +370,17 @@ Internally work in two passes before emitting the final GradeReport:
 
 **Pass 2 — Per-sub-part grading.** Grade each sub-part on its own against the rubric. Never holistically eyeball a multi-part question and pick a single number. Each (i)(ii)(iii) and each (a)(b)(c)(d) MUST appear as its OWN criterion in `criteria`, with its own `awarded`, `max`, and `met` — even when the parent question has a combined mark total. Sum at the end. This is the single biggest source of under-marking, so do not skip it.
 
+# MAXIMUM MARKS COME FROM THE QUESTION PAPER — NEVER FROM THE STUDENT
+
+The maximum marks for each question and sub-part are a property of the QUESTION PAPER, not of what the student wrote. Get them right or every total is wrong:
+
+- Read the printed marks tags on the paper — "[1 Mark]", "[2 Marks]", "[3 Marks]", "[5 Marks]", etc. Those printed numbers ARE the max marks. Do not invent them or infer them from difficulty or from how much the student wrote.
+- EVERY lettered part (a),(b) and EVERY roman part (i),(ii),(iii) carries its OWN printed marks. Emit each as its own entry and sum them for the parent. Example: if Q16(a) is printed "[3 Marks]" and Q16(b) is printed "[2 Marks]", then emit Q16.a (max 3) and Q16.b (max 2) — so Q16's max is 5, NOT 4 and NOT 3.
+- The grand total (`max_total`) is the SUM of every printed mark on the paper and is IDENTICAL for every student of that paper. It does not shrink because a student skipped a part.
+- An unattempted or blank sub-part still has its full max — it scores 0 AWARDED out of its max, and it MUST still appear in `questions`. NEVER drop a sub-part because the student left it blank, and never merge a sub-part's marks into a sibling.
+- If an "=== OFFICIAL MAXIMUM MARKS ===" block is supplied below, it is AUTHORITATIVE: reproduce exactly those sub-parts with exactly those max values, and grade each one separately.
+- Before emitting, add up every `max_score`. It MUST equal the paper's printed total. If it doesn't, you misread a marks tag or dropped a sub-part — find it and fix it.
+
 # PARTIAL CREDIT RULES (apply to every criterion)
 
 Default to partial credit, not zero, whenever the student demonstrates partial understanding. Use this scale per criterion:
@@ -200,9 +393,11 @@ Default to partial credit, not zero, whenever the student demonstrates partial u
 
 Do NOT give 0 just because the wording differs from the model answer. Ask: does the answer convey the rubric's core idea? If yes, it earns at least 50%.
 
-# CONTENT VS LANGUAGE (descriptive / long-form answers only)
+# CONTENT VS LANGUAGE (LANGUAGE / literature papers ONLY)
 
-For descriptive answers worth 3+ marks (paragraphs, diary entries, story completions, 40–50 word and 100–120 word answers in literature), split the marks into two SEPARATE criteria:
+This split applies ONLY to language / literature papers (English, Hindi, Sanskrit, etc.). For content subjects (Social Science, Science, History, Geography, Civics, Economics, Math) DO NOT use it — grade on content/keywords only, with NO language/expression criterion and NO spelling/grammar deduction.
+
+For descriptive answers worth 3+ marks on a LANGUAGE paper (paragraphs, diary entries, story completions, 40–50 word and 100–120 word answers in literature), split the marks into two SEPARATE criteria:
 
 - **"Content / ideas"** — worth ~70% of the question's marks. Judge factual accuracy, coverage of required points, relevance to the prompt. Grammar errors do NOT reduce this score.
 - **"Language / expression"** — worth ~30% of the question's marks. Judge grammar, sentence construction, vocabulary, spelling. Content gaps do NOT reduce this score.
@@ -212,6 +407,29 @@ Award each independently, then sum. This prevents grammar weakness from bleeding
 # OBJECTIVE ANSWERS ARE ALL-OR-NOTHING
 
 The graded partial-credit scale above applies to descriptive / multi-step answers ONLY. For OBJECTIVE items — MCQ choices, true/false, match-the-following, one-word answers, antonyms/synonyms, fill-in-the-blanks — there is no "close enough": the answer is either correct (full marks) or wrong (zero). Do NOT award 25–50% to a wrong antonym, a wrong MCQ option, or a wrong fill-in just because the student attempted it or was "in the ballpark". The ONLY tolerance is an obvious spelling slip where the intended correct word is unambiguous (e.g. "begining" for "beginning") — accept that as correct. Everything else objective is 0.
+
+# READING MCQ / OBJECTIVE CHOICES — TRUST THE PAGE IMAGE, NOT THE OCR LETTER
+
+All-or-nothing cuts both ways: do not mark a CORRECT MCQ wrong either. Decide what the student actually chose by LOOKING at the page image, using BOTH signals together:
+- the option LETTER they circled or wrote — (A)/(B)/(C)/(D), and
+- the option VALUE / expression they wrote next to it — e.g. "xy²", "−10", "four decimal places", "20".
+
+Award FULL marks if EITHER the chosen letter OR the written value matches the correct option in the key. OCR very frequently misreads a hand-circled option letter (a circled "B" can come through as "R", "P", "8", "13", etc.), so NEVER mark an MCQ wrong solely because the transcribed letter looks off — verify against the image and the written value, and give the legible correct value precedence over a garbled letter. Only mark it wrong when the student's actual choice, as seen on the page, genuinely differs from the key. Grade the SAME MCQ identically no matter which student wrote it.
+
+# OBJECTIVE QUESTIONS — REPORT THE LETTERS, THE SYSTEM SCORES THEM IN CODE
+
+For EVERY objective question (MCQ, assertion-reason, true/false, match-the-following where one lettered option is chosen) you must NOT decide the score yourself. The score is computed in code by comparing two letters, which guarantees a correct answer is never marked wrong and that every student is graded identically. For each such question set, on its QuestionMark:
+- `chosen_option`: the SINGLE option letter the student marked, read from the PAGE IMAGE — "A" / "B" / "C" / "D". Use the circled/ticked letter AND the written value together to decide. If the student genuinely left it blank, set "" (the system will mark it Unattempted). Do NOT read this from the OCR transcript.
+- `correct_option`: the correct option letter from the ANSWER KEY — "A" / "B" / "C" / "D".
+- Leave `criteria` empty and set `mark_style` to "single".
+You still report `score`/`max_score`, but the system OVERRIDES the score from the two letters — so getting the letters right is what matters. Set `correct_option` ONLY for genuinely objective questions; leave it "" for every descriptive/short/long answer (those keep normal criteria-based grading).
+
+# SCORE ONLY WHAT THE RUBRIC MARKS — DO NOT INVENT DEDUCTIONS
+
+Award and deduct marks ONLY for criteria defined in the answer key / marking scheme. Do not invent your own criteria.
+- For NON-LANGUAGE subjects (Social Science, History, Geography, Civics, Economics, Science, Mathematics, etc.), spelling, grammar, handwriting, neatness and presentation carry NO marks — NEVER deduct for them. If the content is correct, award full marks even when the writing has spelling/grammar errors. You may note it in the remark, but the score MUST NOT drop for it.
+- Apply the "Content vs Language" split (below) ONLY to LANGUAGE / literature papers (English, Hindi, Sanskrit, etc.), where expression genuinely carries marks. For all other subjects there is NO separate "Language / expression" criterion.
+- Award marks in steps of 0.5 only (…, 1.0, 1.5, 2.0). NEVER produce quarter marks like 4.25 or 0.25 — round to the nearest 0.5.
 
 # SUBJECT-SPECIFIC CONVENTIONS
 
@@ -267,6 +485,10 @@ If you cannot identify a confident anchor, leave `step_line_id` empty — that i
 - Identify every sub-question that requires evaluation (e.g. Q1.A.1, Q1.A.2, Q2.B, Q4.B.iii ...).
 - For EACH sub-question, read the student's handwritten answer carefully and award marks against the rubric.
 - For every sub-question worth more than 1 mark, populate `criteria` with one entry PER rubric step / sub-part / content-vs-language split as described above. The sum of `awarded` MUST equal `score`; the sum of `max` MUST equal `max_score`. Never emit a multi-mark question with empty `criteria`.
+- Set `mark_style` for every question to control how it is marked ON THE SHEET, the way a real teacher would:
+  * `"per_step"` — a tick + the marks beside EACH step/point. Use for numerical/calculation work and multi-step derivations, AND for ENUMERATED answers where each point is on its own line ("state four causes", "list three differences", "give two examples", fill-in-the-blanks) and LABELLED DIAGRAMS. Give each criterion its own `step_line_id` (a text line or `PnDk` diagram region) so each point gets its own tick.
+  * `"single"` — ONE tick + the total + a margin remark. Use for FLOWING PROSE: essays, paragraphs, descriptive English/Hindi/literature answers, history/civics explanations — where ticking every sentence would be wrong.
+  Decide explicitly; only leave `"auto"` when genuinely unsure.
 
 Worked examples of the per-sub-part + partial-credit + content/language rules:
 
@@ -394,6 +616,145 @@ Format the rubric as clean Markdown with one section per top-level question (## 
 At the top, include a one-line total: "**Total: X marks**" reflecting the sum of all sub-question maximums."""
 
 
+# ---------- Deterministic marks-scheme extraction (regex on the printed tags) ----------
+# The printed "[N Mark(s)]" tag is data, not something to reason about — read it with a
+# regex off the PDF text layer (free, instant, can't hallucinate). The LLM extractor below
+# is only a fallback for scanned papers / images that have no text layer.
+
+# A marks tag: "[1 Mark]", "[2 Marks]", "(3 marks)", "[5 mark]" — bracket or paren, sing/plural.
+_MARKS_TAG_RE = re.compile(r"[\[(]\s*(\d+(?:\.\d+)?)\s*marks?\s*[\])]", re.IGNORECASE)
+# A top-level question number at line start: "12." or "12)".
+_QNUM_RE = re.compile(r"^\s*(\d{1,2})\s*[.)]")
+# Lettered sub-part "(a)".."(h)" — lowercase only, so MCQ options "(A)".."(D)" are ignored.
+_SUBLETTER_RE = re.compile(r"^\s*\(?([a-h])\)")
+# Roman sub-part "(i)".."(x)" — lowercase only.
+_SUBROMAN_RE = re.compile(r"^\s*\(?(i{1,3}|iv|v|vi{0,3}|ix|x)\)")
+
+
+def marks_scheme_from_text(pages_text: list[str]) -> MarksScheme:
+    """Parse the per-part maximum marks from question-paper TEXT (no LLM, no cost).
+
+    Walks the lines tracking the current question number and sub-part, and attaches each
+    printed "[N Marks]" tag to that context. Pure function over text so it is unit-testable
+    without a PDF. Returns a MarksScheme (possibly empty if no tags were found).
+    """
+    items: list[MarksItem] = []
+    seen: set[str] = set()
+    cur_q: int | None = None
+    cur_sub: str | None = None
+
+    def _sub_on(s: str) -> str | None:
+        m = _SUBROMAN_RE.match(s) or _SUBLETTER_RE.match(s)
+        return m.group(1).lower() if m else None
+
+    for page in pages_text:
+        for raw in page.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            mq = _QNUM_RE.match(line)
+            if mq:
+                cur_q = int(mq.group(1))
+                # A sub-part may sit on the same line, e.g. "16. (a) Prove ...".
+                cur_sub = _sub_on(line[mq.end():].lstrip())
+            else:
+                sub = _sub_on(line)
+                if sub is not None:
+                    cur_sub = sub
+            for mm in _MARKS_TAG_RE.finditer(line):
+                if cur_q is None:
+                    continue
+                qid = f"Q{cur_q}" + (f".{cur_sub}" if cur_sub else "")
+                if qid in seen:
+                    continue
+                seen.add(qid)
+                desc = _MARKS_TAG_RE.sub("", line).strip(" .:-")[:60]
+                items.append(MarksItem(qid=qid, max=float(mm.group(1)), description=desc))
+
+    return MarksScheme(total=round(sum(it.max for it in items), 3), items=items)
+
+
+def _columnar_text(page: "fitz.Page") -> str:
+    """Extract a page's text in column-aware reading order (left column, then right)."""
+    blocks = [b for b in page.get_text("blocks")
+              if len(b) >= 5 and isinstance(b[4], str) and b[4].strip()]
+    if not blocks:
+        return ""
+    mid = page.rect.width / 2.0
+    left = [b for b in blocks if (b[0] + b[2]) / 2.0 < mid]
+    right = [b for b in blocks if (b[0] + b[2]) / 2.0 >= mid]
+
+    def _ordered(bs: list) -> str:
+        return "\n".join(b[4] for b in sorted(bs, key=lambda b: (round(b[1], 1), b[0])))
+
+    if left and right:                       # genuine two-column layout
+        return _ordered(left) + "\n" + _ordered(right)
+    return _ordered(blocks)                    # single column → plain top-to-bottom
+
+
+def marks_scheme_from_pdf(data: bytes, filename: str) -> MarksScheme | None:
+    """Regex marks scheme from a PDF's text layer. Returns None when not applicable
+    (not a PDF, no text layer, or no tags found) so the caller can fall back to the LLM."""
+    if not (filename or "").lower().endswith(".pdf") or not data:
+        return None
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+        pages_text = [_columnar_text(p) for p in doc]
+        doc.close()
+    except Exception:
+        return None
+    scheme = marks_scheme_from_text(pages_text)
+    return scheme if scheme.items else None
+
+
+MARKS_SCHEME_PROMPT = """You are an exam-paper analyst. Read the QUESTION PAPER images and extract the MAXIMUM MARKS for every question and sub-part, EXACTLY as printed.
+
+Rules:
+- The marks are printed on the paper as "[1 Mark]", "[2 Marks]", "[3 Marks]", "[5 Marks]", etc. Use those printed values verbatim. Do NOT guess and do NOT infer from difficulty.
+- Enumerate EVERY sub-part separately. Lettered parts (a),(b) and roman parts (i),(ii),(iii) each carry their OWN marks. Example: if Q16 has (a) "[3 Marks]" and (b) "[2 Marks]", output two items — Q16.a = 3 and Q16.b = 2 — NOT a single Q16 = 4 or Q16 = 5.
+- If a question has no sub-parts, output one item for it (e.g. Q14 = 3).
+- qid format: top-level "Q14"; lettered "Q16.a"; roman "Q18.iii"; nested "Q6.ii.b".
+- Give a 3-6 word `description` of each part so a teacher can recognise it.
+- `total` = the exact sum of all item maxes. This is the paper's full marks.
+
+Be precise and complete — a single missed sub-part makes the whole denominator wrong."""
+
+
+def extract_marks_scheme(
+    question_paper_pngs: list[bytes],
+    model: str = "claude-opus-4-7",
+    api_key: str | None = None,
+    student_class: str | None = None,
+    subject: str | None = None,
+) -> MarksScheme:
+    """Read the authoritative per-part maximum-marks scheme off the question paper."""
+    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+
+    content: list[dict] = []
+    ctx = exam_context_block(student_class, subject)
+    if ctx:
+        content.append({"type": "text", "text": ctx})
+    content.append({"type": "text", "text": "Question paper:"})
+    for png in question_paper_pngs:
+        content.append(_image_block(png))
+    content.append({"type": "text", "text": "Extract the official maximum-marks scheme as described."})
+
+    with client.messages.stream(
+        model=model,
+        max_tokens=8000,
+        temperature=0,
+        system=MARKS_SCHEME_PROMPT,
+        messages=[{"role": "user", "content": content}],
+        output_format=MarksScheme,
+    ) as stream:
+        final = stream.get_final_message()
+    parsed = getattr(final, "parsed_output", None)
+    if parsed is None:
+        text = next((b.text for b in final.content if b.type == "text"), "")
+        parsed = MarksScheme.model_validate_json(text)
+    return parsed
+
+
 def generate_rubric(
     question_paper_pngs: list[bytes],
     model: str = "claude-opus-4-7",
@@ -437,10 +798,14 @@ def grade_answer_sheet(
     api_key: str | None = None,
     student_class: str | None = None,
     subject: str | None = None,
+    marks_scheme: MarksScheme | None = None,
+    usage_out: dict | None = None,
 ) -> GradeReport:
     """Run the full grading call and return a structured GradeReport.
 
     Provide EITHER answer_key_pngs (uploaded file) OR answer_key_text (AI-generated/edited rubric).
+    Pass marks_scheme to lock the maximum marks to the question paper (consistent denominator).
+    Pass usage_out (a dict) to receive the call's token usage for cost accounting.
     """
     if not answer_key_pngs and not answer_key_text:
         raise ValueError("Provide either answer_key_pngs or answer_key_text.")
@@ -460,6 +825,10 @@ def grade_answer_sheet(
         content.append({"type": "text", "text": answer_key_text})
     for png in (answer_key_pngs or []):
         content.append(_image_block(png))
+
+    msb = marks_scheme_block(marks_scheme)
+    if msb:
+        content.append({"type": "text", "text": msb})
 
     # If we have OCR pages, overlay the line_id labels directly on each page
     # image. This is the biggest win: the model sees the visual location of
@@ -526,8 +895,20 @@ def grade_answer_sheet(
             "Claude hit the output token limit before finishing. "
             "Try gemini-2.5-pro for higher headroom, or simplify the rubric."
         )
+    if usage_out is not None:
+        u = getattr(final, "usage", None)
+        usage_out.update({
+            "provider": "claude",
+            "model": model,
+            # Claude's input_tokens already EXCLUDES cache reads — keep them separate.
+            "input_tokens": int(getattr(u, "input_tokens", 0) or 0) if u else 0,
+            "cached_input_tokens": int(getattr(u, "cache_read_input_tokens", 0) or 0) if u else 0,
+            "cache_write_tokens": int(getattr(u, "cache_creation_input_tokens", 0) or 0) if u else 0,
+            "output_tokens": int(getattr(u, "output_tokens", 0) or 0) if u else 0,
+        })
+
     parsed = getattr(final, "parsed_output", None)
     if parsed is None:
         text = next((b.text for b in final.content if b.type == "text"), "")
         parsed = GradeReport.model_validate_json(text)
-    return parsed
+    return _reconcile_report(parsed, marks_scheme)
