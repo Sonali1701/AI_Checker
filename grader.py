@@ -544,6 +544,16 @@ Worked examples of the per-sub-part + partial-credit + content/language rules:
   * `type: "circle"` — hand-drawn red circle around a FACTUAL error or wrong word choice in prose: e.g., circle "first overall" when the rubric required "first twice", circle a wrong character name, circle a wrong date. Reserve circle for content errors the student must NOTICE.
   Set `target_line_id` to the OCR line containing the wrong word and `target_word` to the exact text — that gives the tightest placement. For each prose answer that lost marks, add 1–4 inline annotations pointing at the actual offending words. Do NOT carpet-bomb the page with annotations — pick the most representative errors.
 
+# KEEP THE OUTPUT COMPACT (this does NOT change how you grade)
+
+Grade exactly as thoroughly as before — SAME number of criteria, SAME partial-credit judgement, SAME care. Only the TEXT you emit should be compact, so the response stays small:
+- Criterion `description`: a 2–5 word LABEL, never a sentence (e.g. "correct formula", "substitution step", "(ii) deforestation point"). Do NOT write explanations or reasoning here.
+- `remark`: ≤ 8 words, and ONLY for sub-questions that lost marks; empty string when full marks.
+- OBJECTIVE questions (where you set `chosen_option`/`correct_option`): leave `criteria` EMPTY and `remark` EMPTY — the system scores and labels them in code, so any text here is wasted.
+- `annotations`: only the 1–3 most important wrong words on an answer; never annotate every error.
+- `overall_remarks`: 2–3 short sentences, no more.
+NEVER reduce the NUMBER of criteria, drop a sub-part, or grade less carefully to save space — only shorten the wording. Granularity and accuracy come first; brevity applies only to the words.
+
 # SELF-CHECK BEFORE EMITTING
 
 Before you finalise the GradeReport, review each multi-part question once more and ask:

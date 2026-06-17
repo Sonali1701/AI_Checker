@@ -54,13 +54,31 @@ def _truthy(v: str | None) -> bool:
     return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _cfg_from_form(provider: str, model: str, api_key: str) -> ProviderConfig:
+# Science/maths reasoning subjects → Gemini 2.5 Pro (more consistent on multi-step work).
+# Everything else (English, Social Science/SST, etc.) stays on Flash. NOTE: "Social Science"
+# contains "science", so it's explicitly excluded.
+_PRO_SUBJECT_KEYWORDS = ("math", "chemistry", "physics", "biolog", "science")
+
+
+def _is_pro_subject(subject: str) -> bool:
+    s = (subject or "").strip().lower()
+    if "social" in s:                      # Social Science / SST is NOT a Pro subject
+        return False
+    return any(k in s for k in _PRO_SUBJECT_KEYWORDS)
+
+
+def _cfg_from_form(provider: str, model: str, api_key: str, subject: str = "") -> ProviderConfig:
     provider = (provider or "gemini").strip().lower()
     if provider not in ("gemini", "claude"):
         provider = "gemini"
     default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-opus-4-7"
     key = (api_key or "").strip() or None
-    cfg = ProviderConfig(provider=provider, model=(model or default_model).strip(), api_key=key)
+    chosen = (model or default_model).strip()
+    # Subject-based routing: grade science/maths with Pro for consistency on multi-step
+    # reasoning; keep Flash for language/humanities. Gemini only (Claude already uses Opus).
+    if provider == "gemini" and _is_pro_subject(subject):
+        chosen = "gemini-2.5-pro"
+    cfg = ProviderConfig(provider=provider, model=chosen, api_key=key)
     if provider == "gemini":
         # Vertex AI Express keys start with "AQ" and MUST hit the Vertex endpoint
         # (genai.Client(vertexai=True, api_key=...)). AI Studio keys ("AIza") use the
@@ -110,7 +128,7 @@ async def detect_marks(
     data = await question_paper.read()
     if not data:
         raise HTTPException(400, "Question paper came through empty — re-upload it.")
-    cfg = _cfg_from_form(provider, model, api_key)
+    cfg = _cfg_from_form(provider, model, api_key, subject)
     try:
         scheme, method = detect_marks_scheme(data, question_paper.filename, cfg,
                                              student_class or None, subject or None)
@@ -136,7 +154,7 @@ async def gen_rubric(
     data = await question_paper.read()
     if not data:
         raise HTTPException(400, "Question paper came through empty — re-upload it.")
-    cfg = _cfg_from_form(provider, model, api_key)
+    cfg = _cfg_from_form(provider, model, api_key, subject)
     try:
         qp_pngs = pdf_or_image_to_pngs(data, question_paper.filename)
         rubric = generate_rubric(qp_pngs, cfg, student_class or None, subject or None)
@@ -208,7 +226,7 @@ async def evaluate(
     use_mathpix_eff = bool(os.environ.get("MATHPIX_APP_KEY"))
     log_eff = has_service_account()
 
-    cfg = _cfg_from_form(provider, model, api_key)
+    cfg = _cfg_from_form(provider, model, api_key, subject)
     job_id = uuid.uuid4().hex
     with _LOCK:
         JOBS[job_id] = {"status": "running", "total": len(sheets), "done": 0,
