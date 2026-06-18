@@ -23,6 +23,29 @@ from mathpix import PageOCR, overlay_anchors_on_png
 
 DEFAULT_MODEL = "gemini-2.0-flash-exp"
 
+# --- Cost & consistency controls for the grading call ------------------------------
+# On Gemini 2.5 the billed "output" is mostly the model's INTERNAL THINKING tokens, and
+# at Pro's $10/1M that is ~80-90% of the per-sheet cost. Cap it: GEMINI_THINKING_BUDGET
+# bounds thinking tokens (still leaves plenty of reasoning), which is the single biggest
+# lever on Pro cost. SEED makes greedy decoding more reproducible run-to-run.
+#   - Raise the budget if you see grading quality/consistency drop on hard papers.
+#   - Lower it (e.g. 2048) to save more. Set 0 to disable the cap (full dynamic thinking).
+_THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "4096"))
+_SEED = int(os.environ.get("GEMINI_SEED", "42"))
+
+
+def _thinking_config():
+    """A ThinkingConfig that caps thinking tokens, or None when disabled / unsupported by
+    the installed SDK (so the code is safe on any google-genai version)."""
+    if _THINKING_BUDGET <= 0:
+        return None
+    try:
+        if "thinking_budget" in types.ThinkingConfig.model_fields:
+            return types.ThinkingConfig(thinking_budget=_THINKING_BUDGET)
+    except Exception:
+        pass
+    return None
+
 
 def _make_client(api_key: str | None, use_vertex: bool,
                  project: str | None = None, location: str | None = None) -> genai.Client:
@@ -208,13 +231,18 @@ def grade_answer_sheet(
     # the non-streaming endpoint drops the connection mid-body on long replies
     # (RemoteProtocolError / "incomplete chunked read"). Streaming reads chunks
     # as they arrive and survives those long generations.
-    config = types.GenerateContentConfig(
+    config_kwargs = dict(
         system_instruction=build_system_prompt(subject),
         temperature=0,
+        seed=_SEED,                       # reproducible greedy decoding (consistency)
         response_mime_type="application/json",
         response_schema=GradeReport,
         max_output_tokens=64000,
     )
+    _tc = _thinking_config()              # cap thinking tokens — the main Pro cost lever
+    if _tc is not None:
+        config_kwargs["thinking_config"] = _tc
+    config = types.GenerateContentConfig(**config_kwargs)
 
     text_chunks: list[str] = []
     finish_reason = None

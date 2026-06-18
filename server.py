@@ -10,7 +10,9 @@ MATHPIX_APP_KEY, ANTHROPIC_API_KEY) — set them in your shell / .env / Render d
 """
 from __future__ import annotations
 
+import ctypes
 import dataclasses
+import gc
 import io
 import json
 import os
@@ -52,6 +54,17 @@ _LOCK = threading.Lock()
 
 def _truthy(v: str | None) -> bool:
     return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _trim_memory() -> None:
+    """Return freed memory to the OS between sheets. Python's allocator otherwise holds
+    onto it, so RSS creeps up across a batch and can OOM the 512 MB free-tier instance —
+    which wipes the in-memory job and makes later sheets 404 ('Graded undefined/undefined')."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)   # Linux (Render); harmless no-op elsewhere
+    except Exception:
+        pass
 
 
 # Science/maths reasoning subjects → Gemini 2.5 Pro (more consistent on multi-step work).
@@ -290,6 +303,8 @@ def _run_job(p: dict) -> None:
             with _LOCK:
                 JOBS[jid]["results"].append(result)
                 JOBS[jid]["done"] += 1
+            p["sheets"][idx] = (name, b"")   # release this sheet's uploaded bytes
+            _trim_memory()                   # return memory to the OS so RSS doesn't creep
         with _LOCK:
             JOBS[jid]["status"] = "done"
             JOBS[jid]["current"] = ""

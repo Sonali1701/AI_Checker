@@ -1,11 +1,11 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const ACCEPT = [".pdf", ".png", ".jpg", ".jpeg"];
-// Provider/model are fixed for the live tool (Gemini Flash, key configured server-side).
+// Provider/model are fixed for the live tool (Gemini, key configured server-side).
 const PROVIDER = "gemini", MODEL = "gemini-2.5-flash";
-const state = { marksItems: [], sheets: [], jobId: null, poll: null };
+const state = { marksItems: [], sheets: [], jobId: null, poll: null, scrolled: false, pollFails: 0 };
 
-function toast(msg, ms = 3800) {
+function toast(msg, ms = 4500) {
   const t = $("toast");
   t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), ms);
@@ -17,7 +17,7 @@ function init() {
     r.onchange = () => { toggleKeySource(); refreshChecklist(); });
   toggleKeySource();
 
-  $("qpFile").onchange = refreshChecklist;
+  $("qpFile").onchange = onQpChange;           // auto-extract questions on upload
   $("akFile").onchange = refreshChecklist;
   $("rubricText").oninput = refreshChecklist;
 
@@ -46,25 +46,36 @@ function toggleKeySource() {
   $("keyRubric").classList.toggle("hidden", v !== "rubric");
 }
 
+function onQpChange() {
+  refreshChecklist();
+  autoDetectMarks();   // surface the extracted questions immediately (regex, free)
+}
+
 // ---- multi-sheet handling ----
 function addSheets(fileList) {
-  let skipped = 0;
+  let skipped = 0, empties = 0;
   for (const f of fileList) {
     if (!ACCEPT.some(ext => f.name.toLowerCase().endsWith(ext))) { skipped++; continue; }
+    if (!f.size) { empties++; continue; }                         // 0-byte / failed read
     if (state.sheets.some(s => s.name === f.name && s.size === f.size)) continue;
     state.sheets.push(f);
   }
   renderSheets();
   if (skipped) toast(`${skipped} file(s) skipped — only PDF/PNG/JPG allowed.`);
+  if (empties) toast(`${empties} file(s) were empty (0 bytes) — re-export or re-scan and try again.`);
 }
 function renderSheets() {
-  $("sheetListWrap").classList.toggle("hidden", state.sheets.length === 0);
-  $("sheetCount").textContent = `${state.sheets.length} sheet${state.sheets.length !== 1 ? "s" : ""}`;
+  const n = state.sheets.length;
+  const kb = state.sheets.reduce((a, f) => a + f.size, 0) / 1024;
+  const sizeTxt = kb > 1024 ? (kb / 1024).toFixed(1) + " MB" : Math.round(kb) + " KB";
+  $("sheetListWrap").classList.toggle("hidden", n === 0);
+  $("sheetCount").textContent = n ? `${n} sheet${n !== 1 ? "s" : ""} · ${sizeTxt}` : "0 sheets";
   const ul = $("sheetList");
   ul.innerHTML = state.sheets.map((f, i) =>
     `<li><span class="nm">${esc(f.name)}</span><span class="sz">${(f.size / 1024).toFixed(0)} KB</span>` +
     `<button class="rm" data-i="${i}" title="Remove">✕</button></li>`).join("");
   ul.querySelectorAll(".rm").forEach(b => b.onclick = () => { state.sheets.splice(+b.dataset.i, 1); renderSheets(); });
+  if (kb / 1024 > 40) toast("Large upload (>40 MB). On the free tier, grade in smaller batches if it stalls.");
   refreshChecklist();
 }
 
@@ -78,7 +89,25 @@ function commonForm() {
   return fd;
 }
 
-// ---- detect marks ----
+// ---- marks / question extraction ----
+async function autoDetectMarks() {
+  const qp = $("qpFile").files[0];
+  if (!qp) return;
+  const fd = commonForm(); fd.append("question_paper", qp);
+  $("marksMethod").textContent = "Reading questions & marks from the paper…";
+  try {
+    const res = await fetch("/api/detect-marks", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) {                       // e.g. scanned paper with no text layer → leave manual button
+      $("marksMethod").textContent = "Couldn't auto-read this paper — click “Detect max marks” or add rows manually.";
+      return;
+    }
+    state.marksItems = data.items;
+    $("marksMethod").textContent = `✅ Extracted ${data.items.length} questions · total ${data.total} marks (from the printed paper). Review/edit below.`;
+    renderMarks();
+  } catch (e) { $("marksMethod").textContent = ""; }
+}
+
 async function detectMarks() {
   const qp = $("qpFile").files[0];
   if (!qp) return toast("Upload a question paper first.");
@@ -89,7 +118,7 @@ async function detectMarks() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "failed");
     state.marksItems = data.items;
-    $("marksMethod").textContent = `✅ Read ${data.total} marks from ${data.method === "regex" ? "the printed paper (no AI)" : "AI"}. Edit below if needed.`;
+    $("marksMethod").textContent = `✅ Extracted ${data.items.length} questions · total ${data.total} marks (${data.method === "regex" ? "from the printed paper" : "via AI"}). Review/edit below.`;
     renderMarks();
   } catch (e) { toast("Could not detect marks: " + e.message); }
   finally { unBusy($("detectMarks"), "🔢 Detect max marks from question paper"); }
@@ -151,7 +180,7 @@ function refreshChecklist() {
     [qp, "Question paper uploaded"],
     [sa > 0, `Answer sheet(s) added${sa ? " — " + sa : ""}`],
     [keyOk, "Answer key / rubric ready"],
-    [marksOk, "Max marks detected (recommended)"],
+    [marksOk, "Questions & max marks detected (recommended)"],
   ];
   $("checklist").innerHTML = rows.map(([ok, t]) => `<li>${ok ? "✅" : "⬜"} ${t}</li>`).join("");
   $("evaluate").disabled = !(qp && sa > 0 && keyOk);
@@ -169,18 +198,21 @@ async function evaluate() {
   else fd.append("rubric_text", $("rubricText").value);
   fd.append("marks_items", JSON.stringify(state.marksItems));
 
+  state.scrolled = false; state.pollFails = 0;
+  resetResults();
   $("evaluate").disabled = true;
   $("progress").classList.remove("hidden");
-  setBar(0, "Submitting…");
+  setBar(0, "Uploading…");
   try {
     const res = await fetch("/api/evaluate", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "failed");
+    let data; try { data = await res.json(); } catch { data = {}; }
+    if (!res.ok) throw new Error(data.detail || `server returned ${res.status}`);
     state.jobId = data.job_id;
+    setBar(0, "Queued…");
     state.poll = setInterval(pollJob, 1500);
     pollJob();
   } catch (e) {
-    toast("Evaluate failed: " + e.message);
+    toast("Couldn't start evaluation: " + e.message);
     $("evaluate").disabled = false; $("progress").classList.add("hidden");
   }
 }
@@ -193,53 +225,82 @@ function setBar(frac, text) {
 async function pollJob() {
   if (!state.jobId) return;
   let job;
-  try { job = await (await fetch("/api/jobs/" + state.jobId)).json(); }
-  catch (e) { return; }
+  try {
+    const r = await fetch("/api/jobs/" + state.jobId);
+    if (!r.ok) throw new Error("status " + r.status);
+    job = await r.json();
+    state.pollFails = 0;
+  } catch (e) {
+    // Job lost (instance restart) or transient network error — tolerate a few, then stop.
+    if (++state.pollFails >= 4) {
+      clearInterval(state.poll); state.poll = null;
+      $("progress").classList.add("hidden"); $("evaluate").disabled = false;
+      toast("Lost the grading job (the server may have restarted). Any completed sheets are shown above; re-run the rest.");
+    }
+    return;
+  }
   const frac = job.total ? job.done / job.total : 0;
   setBar(frac, `Graded ${job.done}/${job.total}${job.current ? " · " + job.current : ""}`);
-  if (job.status === "done" || job.status === "error") {
+
+  // Render results LIVE as each sheet finishes — don't make the user wait for the whole batch.
+  const finished = job.status === "done" || job.status === "error";
+  if ((job.results && job.results.length) || finished) renderResults(job, !finished);
+
+  if (finished) {
     clearInterval(state.poll); state.poll = null;
-    $("progress").classList.add("hidden");
-    $("evaluate").disabled = false;
-    if (job.status === "error") return toast("Job failed: " + (job.error || "unknown"));
-    renderResults(job);
+    $("progress").classList.add("hidden"); $("evaluate").disabled = false;
+    if (job.status === "error" && !(job.results && job.results.length)) {
+      toast("Evaluation failed: " + (job.error || "unknown error"));
+    }
   }
 }
 
-// ---- results (no cost shown) ----
-function renderResults(job) {
-  const ok = job.results.filter(r => r.ok);
-  const failed = job.results.filter(r => !r.ok);
+// ---- results (live; no cost shown) ----
+function renderResults(job, inProgress = false) {
+  const results = job.results || [];
+  const ok = results.filter(r => r.ok);
+  const failed = results.filter(r => !r.ok);
+  const total = job.total || results.length;
+
   $("results").classList.remove("hidden");
-  $("resultsTitle").textContent = `📋 Results — ${job.results.length} sheet${job.results.length !== 1 ? "s" : ""}`;
-  $("results").scrollIntoView({ behavior: "smooth" });
+  $("resultsTitle").textContent = inProgress
+    ? `📋 Grading ${results.length}/${total}…`
+    : `📋 Results — ${total} sheet${total !== 1 ? "s" : ""}`;
+  if (!state.scrolled) { $("results").scrollIntoView({ behavior: "smooth" }); state.scrolled = true; }
 
   let html = "";
-  if (job.results.length > 1 && ok.length) {
-    const avg = ok.reduce((a, r) => a + r.percent, 0) / ok.length;
-    html = metric("Graded", `${ok.length}/${job.results.length}`) +
-      metric("Average", `${avg.toFixed(0)}%`) +
+  if (total > 1) {
+    const avg = ok.length ? ok.reduce((a, r) => a + r.percent, 0) / ok.length : 0;
+    html = metric("Graded", `${results.length}/${total}`) +
+      metric("Average", ok.length ? `${avg.toFixed(0)}%` : "—") +
       metric("Failed", failed.length);
   }
   $("summary").innerHTML = html;
 
   const zip = $("zipBtn");
-  if (ok.length > 1) { zip.href = `/api/jobs/${state.jobId}/zip`; zip.classList.remove("hidden"); }
+  if (!inProgress && ok.length > 1) { zip.href = `/api/jobs/${state.jobId}/zip`; zip.classList.remove("hidden"); }
   else zip.classList.add("hidden");
 
   const box = $("resultRows");
-  if (job.results.length === 1) {
-    box.innerHTML = ok.length ? detailHtml(ok[0]) : failHtml(failed[0]);
+  if (total === 1) {
+    box.innerHTML = results.length ? (ok.length ? detailHtml(ok[0]) : failHtml(failed[0]))
+      : `<p class="muted">⏳ Grading…</p>`;
     return;
   }
+
+  // Batch: a row per sheet (completed → score; not-yet → queued), plus details for completed.
   let t = `<table class="rtable"><thead><tr><th>Student</th><th>Score</th><th>%</th><th>Status</th></tr></thead><tbody>`;
-  for (const r of job.results) {
+  for (const r of results) {
     t += r.ok
       ? `<tr><td>${esc(r.student)}</td><td class="s">${fmt(r.score)} / ${fmt(r.max)}</td><td>${r.percent}%</td><td class="ok">✅</td></tr>`
       : `<tr><td>${esc(r.student)}</td><td>—</td><td>—</td><td class="bad">❌ ${esc(r.error || "")}</td></tr>`;
   }
+  for (let i = results.length; i < total; i++) {
+    const nm = state.sheets[i] ? esc(state.sheets[i].name) : `sheet ${i + 1}`;
+    t += `<tr><td class="muted">${nm}</td><td>—</td><td>—</td><td class="muted">${i === results.length ? "⏳ grading…" : "queued"}</td></tr>`;
+  }
   t += "</tbody></table>";
-  t += job.results.map(r => r.ok
+  t += results.map(r => r.ok
     ? `<details class="rdetail"><summary>✅ ${esc(r.student)} — ${fmt(r.score)}/${fmt(r.max)}</summary>${detailHtml(r)}</details>`
     : `<details class="rdetail"><summary>❌ ${esc(r.student)}</summary>${failHtml(r)}</details>`).join("");
   box.innerHTML = t;
@@ -259,7 +320,7 @@ function detailHtml(r) {
 function failHtml(r) { return `<p class="bad">❌ ${esc(r.student)}: ${esc(r.error || "failed")}</p>`; }
 
 function resetResults() {
-  $("results").classList.add("hidden"); $("resultRows").innerHTML = ""; state.jobId = null;
+  $("results").classList.add("hidden"); $("resultRows").innerHTML = ""; $("summary").innerHTML = "";
 }
 
 // ---- utils ----

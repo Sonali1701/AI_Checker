@@ -1146,11 +1146,6 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     # to the single-mark branch (which handles the empty band via y_fraction).
     use_step_marks = base_step and bool(anchor_lines) and mx >= MIN_MARKS_FOR_STEP
 
-    # When the whole question scored 0 AND the model already wrote a margin
-    # remark, skip the per-step crosses — the cursive remark conveys it and a
-    # column of crosses just looks like litter (a teacher crosses once).
-    suppress_zero_crosses = aw <= 1e-6 and remark != ""
-
     if not anchor_lines:
         page_num = max(1, min(int(getattr(m, "page", 1) or 1), len(student_doc)))
         y_last = float(getattr(m, "y_fraction", 0.1) or 0.1) * student_doc[page_num - 1].rect.height
@@ -1302,31 +1297,46 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
                                    size=circle_size, seed=sstep)
             drew_positive = True
 
-        # Whole question earned nothing → ONE clean cross on its first answer line,
-        # never a column of displaced zero-crosses. Skip entirely if unattempted
-        # (no writing to cross — the margin strip + remark say it).
-        if not drew_positive and not suppress_zero_crosses and anchor_lines and not unattempted:
+        # Whole question earned nothing but WAS attempted → ONE clean cross on its
+        # first answer line (a teacher crosses an attempted-but-wrong answer once).
+        # The per-step loop above already skips zero steps, so this is the only zero
+        # cross — never a column. Skip only when unattempted (no writing to cross —
+        # the margin strip + remark convey that).
+        if not drew_positive and anchor_lines and not unattempted:
             first = anchor_lines[0]
             fpg = student_doc[first["page"] - 1]
             fx = max(2.0, min(first["x1"] + 12, _content_width(fpg) - 40))
             fy = (first["y0"] + first["y1"]) / 2
             _draw_cross(fpg, fx, fy, size=24, seed=seed + "x0")
     else:
-        # Single mark question: draw one tick (or cross) where the answer ends.
-        # Keep the mark on the question's OWN page: when a student answers out of order,
-        # a question's band can bleed onto a LATER page that actually holds another
-        # section's answers (e.g. SEC-B on p3, then MCQs on p4) — marking the band's last
-        # line would jump the score onto that unrelated page. Restrict to the first
-        # answer line's page.
+        # Single mark question: draw one tick (or cross).
+        # OBJECTIVE (MCQ / assertion-reason / match): anchor to the question's OWN
+        # FIRST answer line — a 1-line MCQ must be marked on its own line, never on
+        # the band's last line (which can bleed onto the next answer or a section
+        # header → the MCQ-drift bug). DESCRIPTIVE answers mark where the writing
+        # ENDS (last line). Either way keep the mark on the first answer line's page:
+        # an out-of-order band can bleed onto a LATER page holding another section.
+        is_obj = (
+            bool(getattr(m, "objective", False))
+            or bool(str(getattr(m, "correct_option", "") or "").strip())
+            or bool(str(getattr(m, "chosen_option", "") or "").strip())
+        )
+        # Bound for the anti-overlap nudge: a line-anchored mark may move at most
+        # ~one line-height from its anchor, so it can never cascade onto a different
+        # answer. None == unbounded (the y_fraction fallback has no real line).
+        y_lo = y_hi = None
         if anchor_lines:
             first_pg = anchor_lines[0]["page"]
             same_page = [l for l in anchor_lines if l["page"] == first_pg]
-            last = (same_page or anchor_lines)[-1]
-            mark_page = student_doc[last["page"] - 1]
+            band = same_page or anchor_lines
+            anchor = band[0] if is_obj else band[-1]
+            mark_page = student_doc[anchor["page"] - 1]
             mcw = _content_width(mark_page)
-            y_mark = (last["y0"] + last["y1"]) / 2
-            x_end = last["x1"]
-            mark_page_num = last["page"]
+            y_mark = (anchor["y0"] + anchor["y1"]) / 2
+            x_end = anchor["x1"]
+            mark_page_num = anchor["page"]
+            line_h = max(14.0, anchor["y1"] - anchor["y0"])
+            y_lo, y_hi = y_mark - line_h, y_mark + line_h
         else:
             mark_page = page
             mcw = cw
@@ -1335,39 +1345,49 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             mark_page_num = page_num
 
         # Stagger vertically against every mark already placed on this page (across
-        # ALL questions) so dense pages — e.g. the MCQ block — never overlap.
+        # ALL questions) so dense pages — e.g. the MCQ block — never overlap. The
+        # search is BOUNDED to the mark's own line window so an MCQ tick/cross stays
+        # on its answer instead of being shoved onto the next question's line.
         placed = placed_by_page.setdefault(mark_page_num, [])
         ceiling = mark_page.rect.height - 20
         floor_y = 24.0
         y_mark = max(floor_y, min(y_mark, ceiling))
+        thr = 16 if is_obj else 26
+        step = 16 if is_obj else 30
 
         def _coll(yy: float) -> bool:
-            return any(abs(yy - py) < 26 for py in placed)
+            return any(abs(yy - py) < thr for py in placed)
 
         if _coll(y_mark):
+            lo = floor_y if y_lo is None else max(floor_y, y_lo)
+            hi = ceiling if y_hi is None else min(ceiling, y_hi)
+            slot = None
             down = y_mark
-            while down <= ceiling and _coll(down):
-                down += 30
-            if down <= ceiling:
-                y_mark = down
+            while down <= hi and _coll(down):
+                down += step
+            if down <= hi:
+                slot = down
             else:
                 up = y_mark
-                while up >= floor_y and _coll(up):
-                    up -= 30
-                y_mark = max(floor_y, up)
+                while up >= lo and _coll(up):
+                    up -= step
+                if up >= lo:
+                    slot = up
+            # Nothing free within the window → keep the mark on its own line and
+            # accept a small overlap, rather than drifting it onto another answer.
+            if slot is not None:
+                y_mark = slot
         placed.append(y_mark)
 
-        # OBJECTIVE questions (MCQ / assertion-reason / match): a single tick
-        # (correct) or cross (wrong) — NO circled number. The score is shown in the
-        # clean right-hand MARKS column, so dense MCQ pages don't pile up numbers.
-        is_obj = bool(str(getattr(m, "correct_option", "") or "").strip())
+        # OBJECTIVE questions: a single tick (correct) or cross (wrong) — NO circled
+        # number. The score is shown in the clean right-hand MARKS column, so dense
+        # MCQ pages don't pile up numbers.
         if is_obj:
             tick_size = 26
             tick_x = max(2.0, min(x_end + 16, mcw - 6 - tick_size * 1.6))
-            attempted = bool(str(getattr(m, "chosen_option", "") or "").strip())
             if aw >= mx and mx > 0:
                 _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
-            elif attempted:
+            elif not unattempted:   # attempted-but-wrong → cross; blank → nothing
                 _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
             # unattempted → nothing inline (the margin column says "Unattempted")
         else:

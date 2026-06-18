@@ -89,23 +89,51 @@ class QuestionMark(BaseModel):
             "content. Prefer to decide explicitly between 'per_step' and 'single'."
         ),
     )
+    objective: bool = Field(
+        default=False,
+        description=(
+            "True ONLY for genuinely objective items (MCQ, assertion-reason, true/false, "
+            "match-the-following, one-word/one-value answers where the answer is either right "
+            "or wrong). When True the SYSTEM scores the item in code from `is_correct` / "
+            "`attempted` — set `criteria` empty and `mark_style` to 'single'. Leave False for "
+            "every descriptive / short / long answer (those keep normal criteria-based grading)."
+        ),
+    )
+    attempted: bool = Field(
+        default=True,
+        description=(
+            "OBJECTIVE items only. False ONLY when the student left this item genuinely BLANK "
+            "(wrote nothing). If they wrote ANYTHING for it — a value, a word, a letter, even a "
+            "wrong one — this is True. NEVER mark an item that has writing as not-attempted just "
+            "because you cannot read which option letter it maps to."
+        ),
+    )
+    is_correct: bool = Field(
+        default=False,
+        description=(
+            "OBJECTIVE items only. Your judgement of whether the student's written answer MATCHES "
+            "the correct answer in the key — compared BY VALUE, not by letter. Read what the "
+            "student actually wrote (e.g. '-10', '20', 'four decimal places', 'A is true but R is "
+            "false') and decide if it equals the key's correct answer. This value comparison is "
+            "what the system scores from, so it is the field that matters most — getting the "
+            "option letter is NOT required."
+        ),
+    )
     chosen_option: str = Field(
         default="",
         description=(
-            "OBJECTIVE questions ONLY (MCQ, assertion-reason, true/false, match-the-following). "
-            "The single option LETTER the student actually marked, read from the PAGE IMAGE — "
-            "'A', 'B', 'C', or 'D'. Set '' if the student left it blank (unattempted). NEVER read "
-            "this from the OCR transcript (OCR mangles hand-circled letters). Leave '' for "
-            "descriptive (non-objective) questions."
+            "OBJECTIVE items, OPTIONAL corroboration. The single option LETTER the student marked, "
+            "read from the PAGE IMAGE — 'A'/'B'/'C'/'D' — IF you can clearly tell. Leave '' if the "
+            "student wrote a value but no clear letter (this does NOT make it unattempted — set "
+            "`attempted`/`is_correct` from the value). NEVER read this from the OCR transcript."
         ),
     )
     correct_option: str = Field(
         default="",
         description=(
-            "OBJECTIVE questions ONLY. The correct option LETTER taken from the ANSWER KEY "
-            "('A'/'B'/'C'/'D'). When this is set, the SYSTEM scores the question in code by "
-            "comparing it to `chosen_option` — do NOT decide the score yourself. Leave '' for "
-            "descriptive (non-objective) questions."
+            "OBJECTIVE items, OPTIONAL corroboration. The correct option LETTER from the ANSWER KEY "
+            "('A'/'B'/'C'/'D') IF the key gives one. Used only to phrase the remark and as a "
+            "cross-check; scoring is driven by `is_correct`. Leave '' for descriptive questions."
         ),
     )
 
@@ -203,6 +231,13 @@ def _norm_opt(s: str) -> str:
     return m.group(0).upper() if m else ""
 
 
+def _is_objective(q) -> bool:
+    """An item is scored on the objective (all-or-nothing) path when the model flags it
+    `objective`, OR — for backward compatibility with reports made before that flag — when
+    it supplied a correct-option letter from the key."""
+    return bool(getattr(q, "objective", False)) or bool(_norm_opt(getattr(q, "correct_option", "")))
+
+
 def _snap_half(x: float) -> float:
     """Round to the nearest 0.5 — school marks come in half-mark steps, never 0.25/4.25."""
     try:
@@ -224,7 +259,7 @@ def _reconcile_report(report: GradeReport, marks_scheme: "MarksScheme | None" = 
     for q in report.questions:
         # Objective questions are scored deterministically below (after the max is
         # finalised) — skip the criteria maths for them here.
-        if _norm_opt(getattr(q, "correct_option", "")):
+        if _is_objective(q):
             continue
         if q.criteria:
             for c in q.criteria:                       # half-mark steps only
@@ -251,23 +286,39 @@ def _reconcile_report(report: GradeReport, marks_scheme: "MarksScheme | None" = 
 
     for q in report.questions:
         q.max_score = max(0.0, float(q.max_score))
-        correct = _norm_opt(getattr(q, "correct_option", ""))
-        if correct:
-            # OBJECTIVE: score in CODE by comparing the chosen letter to the key —
-            # never by the model's judgement. A correct option can't be marked wrong,
-            # and grading is identical for every student.
-            chosen = _norm_opt(getattr(q, "chosen_option", ""))
+        if _is_objective(q):
             q.criteria = []
             q.mark_style = "single"
-            if not chosen:
-                q.score = 0.0
-                q.remark = "Unattempted"
-            elif chosen == correct:
-                q.score = q.max_score
-                q.remark = ""
+            chosen = _norm_opt(getattr(q, "chosen_option", ""))
+            correct = _norm_opt(getattr(q, "correct_option", ""))
+            if chosen and correct:
+                # CODE PATH — both option letters are available, so score it
+                # deterministically by comparing the letters. This is the reliable case:
+                # a correct option can't be marked wrong and every student grades alike.
+                if chosen == correct:
+                    q.score = q.max_score
+                    q.remark = ""
+                else:
+                    q.score = 0.0
+                    q.remark = f"Incorrect option (chose {chosen}, correct {correct})"
             else:
-                q.score = 0.0
-                q.remark = f"Incorrect option (chose {chosen}, correct {correct})"
+                # AI PATH — the option letters aren't both available (the student wrote
+                # the VALUE, not a clear letter). Fall back to the model's value-equality
+                # judgement instead of code. Never silently zero an item that has writing.
+                attempted = (
+                    bool(getattr(q, "attempted", True))
+                    or bool(getattr(q, "is_correct", False))
+                    or bool(chosen)
+                )
+                if not attempted:
+                    q.score = 0.0
+                    q.remark = "Unattempted"
+                elif bool(getattr(q, "is_correct", False)):
+                    q.score = q.max_score
+                    q.remark = ""
+                else:
+                    q.score = 0.0
+                    q.remark = "Incorrect answer"
         else:
             q.score = min(max(0.0, float(q.score)), q.max_score)
 
@@ -440,13 +491,15 @@ All-or-nothing cuts both ways: do not mark a CORRECT MCQ wrong either. Decide wh
 
 Award FULL marks if EITHER the chosen letter OR the written value matches the correct option in the key. OCR very frequently misreads a hand-circled option letter (a circled "B" can come through as "R", "P", "8", "13", etc.), so NEVER mark an MCQ wrong solely because the transcribed letter looks off — verify against the image and the written value, and give the legible correct value precedence over a garbled letter. Only mark it wrong when the student's actual choice, as seen on the page, genuinely differs from the key. Grade the SAME MCQ identically no matter which student wrote it.
 
-# OBJECTIVE QUESTIONS — REPORT THE LETTERS, THE SYSTEM SCORES THEM IN CODE
+# OBJECTIVE QUESTIONS — JUDGE BY VALUE, THE SYSTEM SCORES IN CODE
 
-For EVERY objective question (MCQ, assertion-reason, true/false, match-the-following where one lettered option is chosen) you must NOT decide the score yourself. The score is computed in code by comparing two letters, which guarantees a correct answer is never marked wrong and that every student is graded identically. For each such question set, on its QuestionMark:
-- `chosen_option`: the SINGLE option letter the student marked, read from the PAGE IMAGE — "A" / "B" / "C" / "D". Use the circled/ticked letter AND the written value together to decide. If the student genuinely left it blank, set "" (the system will mark it Unattempted). Do NOT read this from the OCR transcript.
-- `correct_option`: the correct option letter from the ANSWER KEY — "A" / "B" / "C" / "D".
+For EVERY objective question (MCQ, assertion-reason, true/false, match-the-following, one-word / one-value answers) you must NOT decide the score yourself — the system scores it in code so a correct answer is never marked wrong and every student is graded identically. Students very often write the ANSWER VALUE (e.g. "−10", "20", "four decimal places", "A is true but R is false") instead of circling a letter, so do NOT depend on reading a letter. On each such QuestionMark set:
+- `objective`: **true**.
+- `attempted`: **true** if the student wrote ANYTHING for this item (a value, word, or letter — even a wrong one). Set **false** ONLY when the item is genuinely BLANK. This is critical: an item that has writing must NEVER be reported as not-attempted just because you cannot tell which letter it maps to.
+- `is_correct`: **true** if what the student wrote MATCHES the key's correct answer compared BY VALUE; otherwise **false**.
+- `chosen_option` / `correct_option`: the option LETTERS — fill BOTH only when you can read the student's choice AND the key's answer clearly. When BOTH are present the system scores by comparing them directly (deterministic); when either is missing the system falls back to your `is_correct` value judgement. So: give clear letters when you have them, and always set `is_correct` for the value-only case. Leaving the letters "" does NOT make the item unattempted.
 - Leave `criteria` empty and set `mark_style` to "single".
-You still report `score`/`max_score`, but the system OVERRIDES the score from the two letters — so getting the letters right is what matters. Set `correct_option` ONLY for genuinely objective questions; leave it "" for every descriptive/short/long answer (those keep normal criteria-based grading).
+Set `objective` true ONLY for genuinely objective items; leave it false for every descriptive / short / long answer (those keep normal criteria-based grading). Grade the SAME objective item identically no matter which student wrote it or how messy the handwriting is.
 
 # SCORE ONLY WHAT THE RUBRIC MARKS — DO NOT INVENT DEDUCTIONS
 
@@ -549,7 +602,7 @@ Worked examples of the per-sub-part + partial-credit + content/language rules:
 Grade exactly as thoroughly as before — SAME number of criteria, SAME partial-credit judgement, SAME care. Only the TEXT you emit should be compact, so the response stays small:
 - Criterion `description`: a 2–5 word LABEL, never a sentence (e.g. "correct formula", "substitution step", "(ii) deforestation point"). Do NOT write explanations or reasoning here.
 - `remark`: ≤ 8 words, and ONLY for sub-questions that lost marks; empty string when full marks.
-- OBJECTIVE questions (where you set `chosen_option`/`correct_option`): leave `criteria` EMPTY and `remark` EMPTY — the system scores and labels them in code, so any text here is wasted.
+- OBJECTIVE questions (where you set `objective: true`): leave `criteria` EMPTY and `remark` EMPTY — the system scores and labels them in code, so any text here is wasted.
 - `annotations`: only the 1–3 most important wrong words on an answer; never annotate every error.
 - `overall_remarks`: 2–3 short sentences, no more.
 NEVER reduce the NUMBER of criteria, drop a sub-part, or grade less carefully to save space — only shorten the wording. Granularity and accuracy come first; brevity applies only to the words.
