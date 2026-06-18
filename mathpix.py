@@ -56,6 +56,34 @@ class PageOCR:
         return "\n".join(f"[{l.line_id}] {l.text}" for l in self.lines)
 
 
+def pageocr_to_dict(p: "PageOCR") -> dict:
+    """JSON-safe dict for sending OCR results over the wire (proxy -> client), so the
+    client can place mark anchors when it builds the evaluated PDF locally."""
+    return {
+        "page": p.page,
+        "image_width": p.image_width,
+        "image_height": p.image_height,
+        "lines": [
+            {"line_id": l.line_id, "text": l.text, "bbox": list(l.bbox), "page": l.page}
+            for l in p.lines
+        ],
+    }
+
+
+def pageocr_from_dict(d: dict) -> "PageOCR":
+    """Inverse of pageocr_to_dict — rebuild a PageOCR on the client side."""
+    return PageOCR(
+        page=int(d["page"]),
+        image_width=int(d["image_width"]),
+        image_height=int(d["image_height"]),
+        lines=[
+            LineBox(line_id=l["line_id"], text=l["text"],
+                    bbox=tuple(l["bbox"]), page=int(l["page"]))
+            for l in d.get("lines", [])
+        ],
+    )
+
+
 def _headers() -> dict[str, str]:
     key = os.environ.get("MATHPIX_APP_KEY")
     if not key:

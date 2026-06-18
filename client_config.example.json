@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this to client_config.json next to the app and fill in your details. proxy_url is the grading-server URL you were given; token is YOUR personal access token (don't share it).",
+  "proxy_url": "https://your-ai-checker-proxy.onrender.com",
+  "token": "tok_your_personal_token_here"
+}

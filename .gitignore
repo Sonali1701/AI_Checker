@@ -19,3 +19,10 @@ venv/
 # Editor/agent state + archives (not needed in the repo)
 .claude/
 *.zip
+
+# PyInstaller build output (the EXE is large; distribute it outside git)
+build/
+dist/
+
+# Per-user client config holds a personal access token — never commit
+client_config.json

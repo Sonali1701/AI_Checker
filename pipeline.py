@@ -46,6 +46,45 @@ class ProviderConfig:
         return os.environ.get("ANTHROPIC_API_KEY" if self.is_claude else "GOOGLE_API_KEY") or None
 
 
+def _truthy(v) -> bool:
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_PRO_SUBJECT_KEYWORDS = ("math", "chemistry", "physics", "biolog", "science")
+
+
+def is_pro_subject(subject: str) -> bool:
+    """Science/maths subjects route to Gemini Pro for multi-step reasoning consistency.
+    Social Science / SST does NOT (it's humanities), even though it contains 'science'."""
+    s = (subject or "").strip().lower()
+    if "social" in s:
+        return False
+    return any(k in s for k in _PRO_SUBJECT_KEYWORDS)
+
+
+def cfg_from_request(provider: str, model: str, api_key: str, subject: str = "") -> ProviderConfig:
+    """Build a ProviderConfig from request fields. Canonical home for the subject-based
+    Pro routing + Vertex-Express ('AQ' key) auto-detection, shared by the all-in-one
+    server and the AI proxy so the two never drift. Pass api_key='' on the proxy so the
+    key comes only from the server's own environment."""
+    provider = (provider or "gemini").strip().lower()
+    if provider not in ("gemini", "claude"):
+        provider = "gemini"
+    default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-opus-4-7"
+    key = (api_key or "").strip() or None
+    chosen = (model or default_model).strip()
+    if provider == "gemini" and is_pro_subject(subject):
+        chosen = "gemini-2.5-pro"
+    cfg = ProviderConfig(provider=provider, model=chosen, api_key=key)
+    if provider == "gemini":
+        effective = key or os.environ.get("GOOGLE_API_KEY") or ""
+        if effective.startswith("AQ") or _truthy(os.environ.get("GEMINI_USE_VERTEX")):
+            cfg.gemini_vertex = True
+            cfg.project = os.environ.get("GOOGLE_CLOUD_PROJECT") or None
+            cfg.location = os.environ.get("GOOGLE_CLOUD_LOCATION") or None
+    return cfg
+
+
 def generate_rubric(qp_pngs, cfg: ProviderConfig, student_class=None, subject=None) -> str:
     if cfg.is_claude:
         return claude_generate_rubric(qp_pngs, model=cfg.model, api_key=cfg.resolved_key(),
@@ -77,35 +116,20 @@ def detect_marks_scheme(qp_bytes: bytes, filename: str, cfg: ProviderConfig | No
     return _extract_marks(qp_pngs, cfg, student_class, subject), "ai"
 
 
-def marks_scheme_from_items(items: list[dict]) -> MarksScheme | None:
-    """Build a MarksScheme from the editable table the UI sends (qid/max/part rows)."""
-    m_items = []
-    for r in items or []:
-        qid = str(r.get("qid", "")).strip()
-        if not qid:
-            continue
-        try:
-            m_items.append(MarksItem(qid=qid, max=float(r.get("max", 0) or 0),
-                                     description=str(r.get("part") or "")))
-        except (TypeError, ValueError):
-            continue
-    if not m_items:
-        return None
-    return MarksScheme(total=sum(i.max for i in m_items), items=m_items)
+# marks_scheme_from_items now lives in grader.py (SDK-free) so the desktop client can use
+# it without importing the AI graders; re-exported here for existing callers (server.py).
+from grader import marks_scheme_from_items  # noqa: E402,F401
 
 
-def grade_sheet(*, qp_pngs: list[bytes], sa_bytes: bytes, filename: str,
-                ak_pngs: list[bytes] | None, ak_text: str | None,
-                marks_scheme: MarksScheme | None, cfg: ProviderConfig,
-                student_class=None, subject=None, use_mathpix: bool = False,
-                usd_to_inr: float = DEFAULT_USD_TO_INR) -> dict:
-    """Grade ONE answer sheet against the shared paper/key/scheme.
-
-    Returns a dict with the report, cost breakdown, and the evaluated PDF bytes.
-    Raises on failure so the caller can record a per-sheet error and continue.
-    """
-    sa_pngs = pdf_or_image_to_pngs(sa_bytes, filename)
-
+def grade_prepared(*, qp_pngs: list[bytes], sa_pngs: list[bytes],
+                   ak_pngs: list[bytes] | None, ak_text: str | None,
+                   marks_scheme: MarksScheme | None, cfg: ProviderConfig,
+                   student_class=None, subject=None, use_mathpix: bool = False,
+                   usd_to_inr: float = DEFAULT_USD_TO_INR) -> dict:
+    """The SECRET-using half of grading: OCR + LLM grade + cost, on ALREADY-RENDERED
+    page images. No PDF rendering and no evaluated-PDF build happen here — those stay
+    on the client in the proxy model, so this can run on a tiny key-holding server that
+    never holds a whole batch in memory. Returns {report, ocr_pages, usage, cost}."""
     ocr_pages = ocr_transcript = None
     if use_mathpix:
         ocr_pages = ocr_all_pages(sa_pngs)
@@ -130,6 +154,28 @@ def grade_sheet(*, qp_pngs: list[bytes], sa_bytes: bytes, filename: str,
 
     mathpix_pages = len(sa_pngs) if use_mathpix else 0
     cost = compute_cost(usage, mathpix_pages=mathpix_pages, usd_to_inr=usd_to_inr)
+    return {"report": report, "ocr_pages": ocr_pages, "usage": usage, "cost": cost}
+
+
+def grade_sheet(*, qp_pngs: list[bytes], sa_bytes: bytes, filename: str,
+                ak_pngs: list[bytes] | None, ak_text: str | None,
+                marks_scheme: MarksScheme | None, cfg: ProviderConfig,
+                student_class=None, subject=None, use_mathpix: bool = False,
+                usd_to_inr: float = DEFAULT_USD_TO_INR) -> dict:
+    """Grade ONE answer sheet end-to-end (render → grade → build evaluated PDF). Used by
+    the all-in-one server and the legacy app. The proxy client instead calls
+    `grade_prepared` (no render) and builds the PDF itself.
+
+    Returns a dict with the report, cost breakdown, and the evaluated PDF bytes.
+    Raises on failure so the caller can record a per-sheet error and continue.
+    """
+    sa_pngs = pdf_or_image_to_pngs(sa_bytes, filename)
+    res = grade_prepared(
+        qp_pngs=qp_pngs, sa_pngs=sa_pngs, ak_pngs=ak_pngs, ak_text=ak_text,
+        marks_scheme=marks_scheme, cfg=cfg, student_class=student_class,
+        subject=subject, use_mathpix=use_mathpix, usd_to_inr=usd_to_inr,
+    )
     pdf_bytes = build_evaluated_pdf(student_pdf_bytes=sa_bytes, student_filename=filename,
-                                    student_pngs=sa_pngs, report=report, ocr_pages=ocr_pages)
-    return {"report": report, "cost": cost, "pdf_bytes": pdf_bytes}
+                                    student_pngs=sa_pngs, report=res["report"],
+                                    ocr_pages=res["ocr_pages"])
+    return {"report": res["report"], "cost": res["cost"], "pdf_bytes": pdf_bytes}

@@ -7,12 +7,20 @@ import re
 from io import BytesIO
 from typing import Literal
 
-import anthropic
 import fitz  # PyMuPDF
 from PIL import Image
 from pydantic import BaseModel, Field
 
 from mathpix import PageOCR, overlay_anchors_on_png
+
+
+def _anthropic_client(api_key: str | None):
+    """Lazily construct the Anthropic client. Importing `anthropic` lazily (not at module
+    top) keeps the desktop CLIENT — which uses this module only for the schema, regex
+    marks detection, and PDF utils, never the Claude API — free of the heavy SDK, so the
+    packaged EXE stays small and doesn't bundle SDK transitive deps it never calls."""
+    import anthropic
+    return anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
 
 
 # ---------- Output schema ----------
@@ -190,6 +198,25 @@ class MarksScheme(BaseModel):
     """The full per-part maximum-marks breakdown of a paper. Fixed for every student."""
     total: float = Field(description="Sum of every item's max — the paper's full marks.")
     items: list[MarksItem] = Field(default_factory=list)
+
+
+def marks_scheme_from_items(items: list[dict]) -> "MarksScheme | None":
+    """Build a MarksScheme from the editable table the UI sends (qid/max/part rows). Lives
+    here (not pipeline) so the SDK-free desktop client can use it without importing the
+    AI graders. pipeline re-exports it for backward compatibility."""
+    m_items = []
+    for r in items or []:
+        qid = str(r.get("qid", "")).strip()
+        if not qid:
+            continue
+        try:
+            m_items.append(MarksItem(qid=qid, max=float(r.get("max", 0) or 0),
+                                     description=str(r.get("part") or "")))
+        except (TypeError, ValueError):
+            continue
+    if not m_items:
+        return None
+    return MarksScheme(total=sum(i.max for i in m_items), items=m_items)
 
 
 def _norm_qid(qid: str | None) -> str:
@@ -892,7 +919,7 @@ def extract_marks_scheme(
     subject: str | None = None,
 ) -> MarksScheme:
     """Read the authoritative per-part maximum-marks scheme off the question paper."""
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    client = _anthropic_client(api_key)
 
     content: list[dict] = []
     ctx = exam_context_block(student_class, subject)
@@ -927,7 +954,7 @@ def generate_rubric(
     subject: str | None = None,
 ) -> str:
     """Generate an editable Markdown rubric from the question paper alone."""
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    client = _anthropic_client(api_key)
 
     content: list[dict] = []
     ctx = exam_context_block(student_class, subject)
@@ -974,7 +1001,7 @@ def grade_answer_sheet(
     if not answer_key_pngs and not answer_key_text:
         raise ValueError("Provide either answer_key_pngs or answer_key_text.")
 
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    client = _anthropic_client(api_key)
 
     content: list[dict] = []
     ctx = exam_context_block(student_class, subject)
