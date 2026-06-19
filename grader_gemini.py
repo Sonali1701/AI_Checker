@@ -34,14 +34,16 @@ _THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "4096"))
 _SEED = int(os.environ.get("GEMINI_SEED", "42"))
 
 
-def _thinking_config():
+def _thinking_config(budget: int | None = None):
     """A ThinkingConfig that caps thinking tokens, or None when disabled / unsupported by
-    the installed SDK (so the code is safe on any google-genai version)."""
-    if _THINKING_BUDGET <= 0:
+    the installed SDK (so the code is safe on any google-genai version). `budget` overrides
+    the GEMINI_THINKING_BUDGET default for one call (e.g. give Flash a bigger budget than Pro)."""
+    b = _THINKING_BUDGET if budget is None else int(budget)
+    if b <= 0:
         return None
     try:
         if "thinking_budget" in types.ThinkingConfig.model_fields:
-            return types.ThinkingConfig(thinking_budget=_THINKING_BUDGET)
+            return types.ThinkingConfig(thinking_budget=b)
     except Exception:
         pass
     return None
@@ -250,6 +252,7 @@ def grade_answer_sheet(
     subject: str | None = None,
     marks_scheme: MarksScheme | None = None,
     usage_out: dict | None = None,
+    thinking_budget: int | None = None,
 ) -> GradeReport:
     if not answer_key_pngs and not answer_key_text:
         raise ValueError("Provide either answer_key_pngs or answer_key_text.")
@@ -325,7 +328,7 @@ def grade_answer_sheet(
         response_schema=GradeReport,
         max_output_tokens=64000,
     )
-    _tc = _thinking_config()              # cap thinking tokens — the main Pro cost lever
+    _tc = _thinking_config(thinking_budget)   # cap thinking tokens — the main Pro cost lever
     if _tc is not None:
         config_kwargs["thinking_config"] = _tc
     config = types.GenerateContentConfig(**config_kwargs)

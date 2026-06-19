@@ -1003,36 +1003,6 @@ def _draw_bulleted_remarks(page: fitz.Page, x: float, y: float, text: str, *,
     return y
 
 
-def _cover_page(doc: fitz.Document, report: GradeReport) -> None:
-    page = doc.new_page(width=595, height=842)  # A4
-    # EVALUATED banner
-    page.draw_rect(fitz.Rect(40, 40, 555, 100), color=RED, width=2)
-    page.insert_text((180, 80), "EVALUATED", fontsize=36, color=RED, fontname="hebo")
-
-    # Total
-    page.insert_text(
-        (40, 160),
-        f"Total Score: {report.total_score} / {report.max_total}",
-        fontsize=24, color=RED, fontname="hebo",
-    )
-
-    # Remarks (formatted as bullet points for the student)
-    y = 220
-    page.insert_text((40, y), "Remarks:", fontsize=14, color=BLACK, fontname="hebo")
-    y = _draw_bulleted_remarks(page, 40, y + 22, report.overall_remarks, size=11, color=BLACK, max_width=515)
-
-    # Section breakdown
-    y += 30
-    page.insert_text((40, y), "Question-wise Totals:", fontsize=14, color=BLACK, fontname="hebo")
-    y += 25
-    for sec in report.section_totals:
-        line = f"{sec.get('qid', '?')}: {sec.get('score', 0)} / {sec.get('max_score', 0)}"
-        page.insert_text((60, y), line, fontsize=12, color=RED, fontname="hebo")
-        y += 20
-        if y > 780:
-            break
-
-
 def _add_diagram_anchors(lines: list[dict], gap_threshold: float = 70.0) -> list[dict]:
     """Synthesize virtual 'diagram' anchor lines in big vertical gaps between OCR lines.
 
@@ -2076,23 +2046,56 @@ def _draw_inline_annotations(page: fitz.Page, annotations: list,
             _draw_strikethrough(page, x, y, width or 40.0)
 
 
-def _summary_page(doc: fitz.Document, report: GradeReport) -> None:
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((40, 60), "Question-wise Summary:", fontsize=18, color=RED, fontname="hebo")
+def _draw_report_panel(page: fitz.Page, rect: fitz.Rect, report: GradeReport) -> None:
+    """Draw the whole report — EVALUATED banner, total, remarks, per-question totals, and
+    where-marks-were-lost — into `rect`, a full-width panel on the LEFT of page 1. Replaces
+    the old standalone cover + summary pages. Sizes scale with the panel height so the panel
+    matches the student sheet and the first page reads as one uniform sheet."""
+    x0, y0, W, H = rect.x0, rect.y0, rect.width, rect.height
+    s = max(0.7, min(1.3, H / 842.0))           # scale relative to the old A4 cover layout
+    pad = 34 * s
+    x = x0 + pad
+    colw = min(W - 2 * pad, 680 * s)            # keep lines readable on very wide (landscape) sheets
+    bottom = y0 + H - pad
 
-    y = 100
-    lost = [q for q in report.questions if q.score < q.max_score and q.remark]
-    if not lost:
-        page.insert_text((40, y), "Full marks awarded across the board.", fontsize=12, color=BLACK)
-        return
-    for q in lost:
-        header = f"{q.qid}:"
-        page.insert_text((40, y), header, fontsize=12, color=RED, fontname="hebo")
-        y = _draw_text(page, 90, y, q.remark, size=12, color=RED, max_width=460)
-        y += 8
-        if y > 800:
-            page = doc.new_page(width=595, height=842)
-            y = 60
+    bh = 54 * s
+    page.draw_rect(fitz.Rect(x, y0 + pad, x0 + W - pad, y0 + pad + bh), color=RED, width=2 * s)
+    tw = fitz.get_text_length("EVALUATED", fontname="hebo", fontsize=30 * s)
+    page.insert_text((x0 + (W - tw) / 2, y0 + pad + bh * 0.66), "EVALUATED",
+                     fontsize=30 * s, color=RED, fontname="hebo")
+    y = y0 + pad + bh + 36 * s
+
+    page.insert_text((x, y), f"Total Score: {report.total_score} / {report.max_total}",
+                     fontsize=20 * s, color=RED, fontname="hebo")
+    y += 34 * s
+
+    page.insert_text((x, y), "Remarks:", fontsize=13 * s, color=BLACK, fontname="hebo")
+    y = _draw_bulleted_remarks(page, x, y + 18 * s, report.overall_remarks,
+                               size=10.5 * s, color=BLACK, max_width=colw)
+
+    y += 20 * s
+    page.insert_text((x, y), "Question-wise Totals:", fontsize=13 * s, color=BLACK, fontname="hebo")
+    y += 19 * s
+    for sec in report.section_totals:
+        if y > bottom:
+            break
+        line = f"{sec.get('qid', '?')}: {sec.get('score', 0)} / {sec.get('max_score', 0)}"
+        page.insert_text((x + 14 * s, y), line, fontsize=11 * s, color=RED, fontname="hebo")
+        y += 17 * s
+
+    lost = [q for q in report.questions
+            if q.score < q.max_score and (getattr(q, "remark", "") or "").strip()]
+    if lost and y < bottom - 28 * s:
+        y += 16 * s
+        page.insert_text((x, y), "Where marks were lost:", fontsize=13 * s, color=RED, fontname="hebo")
+        y += 18 * s
+        for q in lost:
+            if y > bottom:
+                break
+            page.insert_text((x, y), f"{q.qid}:", fontsize=10.5 * s, color=RED, fontname="hebo")
+            y = _draw_text(page, x + 32 * s, y, q.remark, size=10.5 * s, color=RED,
+                           fontname="helv", max_width=colw - 32 * s)
+            y += 6 * s
 
 
 def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
@@ -2131,7 +2134,6 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
         ]
 
     out = fitz.open()
-    _cover_page(out, report)
 
     # Build or open the student doc
     is_pdf = student_filename.lower().endswith(".pdf")
@@ -2198,10 +2200,23 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
         if anns:
             _draw_inline_annotations(page, anns, line_index=line_index)
 
-    out.insert_pdf(student_doc)
+    # First page gets the report as a full-width LEFT panel (same size as the sheet),
+    # replacing the old standalone cover + summary pages. The already-annotated first page
+    # (with its right marks strip) is placed to the right of the panel; the rest copy as-is.
+    n = len(student_doc)
+    if n == 0:
+        _draw_report_panel(out.new_page(width=595, height=842), fitz.Rect(0, 0, 595, 842), report)
+    else:
+        sw = student_doc[0].rect.width
+        sh = student_doc[0].rect.height
+        panel_w = _CONTENT_W.get((id(student_doc), 1), sw)   # report panel = student-sheet width
+        p0 = out.new_page(width=panel_w + sw, height=sh)
+        _draw_report_panel(p0, fitz.Rect(0, 0, panel_w, sh), report)
+        p0.draw_line(fitz.Point(panel_w, 0), fitz.Point(panel_w, sh), color=RED, width=1.0)
+        p0.show_pdf_page(fitz.Rect(panel_w, 0, panel_w + sw, sh), student_doc, 0)
+        if n > 1:
+            out.insert_pdf(student_doc, from_page=1, to_page=n - 1)
     student_doc.close()
-
-    _summary_page(out, report)
 
     buf = BytesIO()
     out.save(buf, garbage=4, deflate=True)
