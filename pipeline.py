@@ -73,8 +73,11 @@ def cfg_from_request(provider: str, model: str, api_key: str, subject: str = "")
     default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-opus-4-7"
     key = (api_key or "").strip() or None
     chosen = (model or default_model).strip()
-    if provider == "gemini" and is_pro_subject(subject):
-        chosen = "gemini-2.5-pro"
+    if provider == "gemini":
+        if _truthy(os.environ.get("FORCE_FLASH")):
+            chosen = "gemini-2.5-flash"        # temporary override: Flash for ALL subjects
+        elif is_pro_subject(subject):
+            chosen = "gemini-2.5-pro"          # science/maths → Pro for reasoning consistency
     cfg = ProviderConfig(provider=provider, model=chosen, api_key=key)
     if provider == "gemini":
         effective = key or os.environ.get("GOOGLE_API_KEY") or ""

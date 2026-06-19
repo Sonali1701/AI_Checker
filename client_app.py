@@ -101,7 +101,7 @@ def _png_files(field: str, pngs: list[bytes]) -> list:
     return [(field, (f"{field}{i}.png", b, "image/png")) for i, b in enumerate(pngs)]
 
 
-def _thumb_png(png: bytes, max_side: int = 400) -> bytes:
+def _thumb_png(png: bytes, max_side: int = 1000) -> bytes:
     img = Image.open(BytesIO(png)).convert("RGB")
     w, h = img.size
     s = max_side / max(w, h)
@@ -126,8 +126,9 @@ def _orient_doc(url: str, token: str, data: bytes, filename: str) -> bytes:
             print(f"[orient] {filename}: /ai/orient HTTP {r.status_code} — left as-is "
                   f"(is the proxy redeployed with /ai/orient?)")
             return data
-        rots = r.json().get("rotations") or []
-        print(f"[orient] {filename}: rotations={rots}")
+        body = r.json()
+        rots = body.get("rotations") or []
+        print(f"[orient] {filename}: rotations={rots} debug={body.get('debug')}")
         if not any(rots):
             return data
         new, _, changed = normalize_orientation(data, filename, rotations=rots)

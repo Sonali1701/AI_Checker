@@ -83,45 +83,62 @@ def orientation_probe(
     use_vertex: bool = False,
     project: str | None = None,
     location: str | None = None,
+    debug: dict | None = None,
 ) -> list[int]:
     """Ask a cheap Flash call, in ONE batched request, how to straighten each page.
 
     Returns the counter-clockwise angle (0/90/180/270) to apply to each page so the
     writing is upright — same convention as orient.detect_rotation / PIL Image.rotate.
-    Pages are downscaled hard first, so this costs a fraction of a paisa per sheet.
-    Never raises: on any failure it returns all-zeros (leave pages as-is)."""
+    Never raises: on any failure it returns all-zeros (leave pages as-is). When `debug` is
+    given it's filled with the model's raw reply / any error, for log-based diagnosis."""
     import json
     import re
 
     if not page_pngs:
         return []
+    raw = ""
+    err = ""
+    out: list[int] = []
     try:
         client = _make_client(api_key, use_vertex, project, location)
+        # Vision models READ rotated text without trouble, so a vague "is this upright?"
+        # gets a lazy "yes". Force a concrete judgement off the geometry of the writing.
         parts = [_text_part(
-            "Below are page images of a handwritten exam, in order. For EACH image decide how "
-            "many degrees of COUNTER-CLOCKWISE rotation make the writing upright and reading "
-            "left-to-right. Allowed values: 0 (already upright), 90, 180, 270. "
-            "Return ONLY a JSON array of integers, one per image, in order. "
-            "Example for three images: [0, 90, 0]"
+            "Each image is one page of a HANDWRITTEN exam. Some pages were photographed "
+            "SIDEWAYS or upside-down. For EACH image, in order, tell me how to make the "
+            "handwriting upright.\n"
+            "Decide from the GEOMETRY, not from whether you can read it:\n"
+            "- If the lines of writing already run left-to-right horizontally → 0\n"
+            "- If the page must be turned a QUARTER-TURN ANTICLOCKWISE to read it (the "
+            "writing currently runs bottom-to-top) → 90\n"
+            "- If it is UPSIDE DOWN → 180\n"
+            "- If it must be turned a quarter-turn CLOCKWISE (writing runs top-to-bottom) → 270\n"
+            "A page photographed in landscape (wider than tall) is almost always 90 or 270, "
+            "NOT 0. Reply with ONLY a JSON array of these integers, one per image, in order, "
+            "e.g. [90, 90, 0]."
         )]
         for p in page_pngs:
-            parts.append(_image_part(_downscale_for_model(p, max_edge=384)))
+            parts.append(_image_part(_downscale_for_model(p, max_edge=900)))
         resp = client.models.generate_content(
             model=model,
             contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(temperature=0, max_output_tokens=200),
         )
-        m = re.search(r"\[[^\]]*\]", resp.text or "")
+        raw = (resp.text or "").strip()
+        m = re.search(r"\[[^\]]*\]", raw)
         arr = json.loads(m.group(0)) if m else []
-        out = []
         for v in arr:
             try:
                 iv = int(v) % 360
             except (TypeError, ValueError):
                 iv = 0
             out.append(iv if iv in (0, 90, 180, 270) else 0)
-    except Exception:
-        out = []
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    if debug is not None:
+        debug["raw"] = raw[:200]
+        debug["error"] = err
+        debug["model"] = model
     return (out + [0] * len(page_pngs))[: len(page_pngs)]
 
 

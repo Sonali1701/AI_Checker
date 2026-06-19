@@ -153,13 +153,15 @@ async def orient_ep(
         return {"rotations": []}
     from grader_gemini import orientation_probe
     cfg = cfg_from_request("gemini", "gemini-2.5-flash", "", "")   # always Flash — cheapest
+    debug: dict = {}
     try:
         rot = orientation_probe(pngs, model="gemini-2.5-flash", api_key=cfg.resolved_key(),
                                 use_vertex=cfg.gemini_vertex, project=cfg.project,
-                                location=cfg.location)
-    except Exception:
+                                location=cfg.location, debug=debug)
+    except Exception as e:  # noqa: BLE001
         rot = [0] * len(pngs)
-    return {"rotations": rot}
+        debug = {"error": str(e)}
+    return {"rotations": rot, "debug": debug}
 
 
 @app.post("/ai/generate-rubric")
