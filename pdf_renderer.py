@@ -2054,10 +2054,10 @@ def _draw_inline_annotations(page: fitz.Page, annotations: list,
 _RS_PAD = 20.0          # outer padding
 _RS_GUT = 26.0          # gutter between columns
 _RS_BANNER_H = 40.0
-_RS_TOTAL_SIZE = 17.0
-_RS_HEAD_SIZE = 11.5
-_RS_BODY_SIZE = 9.5
-_RS_LINE = 14.0         # generous per-line height for measuring (>= helpers' real line height)
+_RS_TOTAL_SIZE = 19.0
+_RS_HEAD_SIZE = 13.5
+_RS_BODY_SIZE = 11.5
+_RS_LINE = 16.5         # generous per-line height for measuring (>= helpers' real line height)
 
 
 def _rs_columns(x0: float, W: float) -> tuple[float, list[float]]:
