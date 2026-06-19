@@ -304,6 +304,29 @@ def _reconcile_report(report: GradeReport, marks_scheme: "MarksScheme | None" = 
             if n in canon:
                 q.max_score = float(canon[n].max)
                 seen.add(n)
+        # Reconcile leftovers: a report question whose qid ISN'T in the scheme usually means
+        # the model renumbered it (e.g. it graded the mirror question "Q4" while the paper —
+        # and so the locked scheme — calls it "Q5"). Map each leftover onto an as-yet-unfilled
+        # scheme slot of the SAME max (preferring the same top-level number) and relabel it,
+        # so the answer is counted ONCE instead of appearing twice (once graded, once as a
+        # phantom "[not graded]"). The scheme is authoritative, so a leftover that fits no
+        # slot is dropped rather than allowed to inflate the denominator.
+        leftovers = [q for q in report.questions if _norm_qid(q.qid) not in canon]
+        for q in leftovers:
+            slot = None
+            for it in marks_scheme.items:
+                n = _norm_qid(it.qid)
+                if n in seen or float(it.max) != float(q.max_score):
+                    continue
+                slot = it
+                if _top_level_qid(it.qid) == _top_level_qid(q.qid):
+                    break                                  # prefer the same top-level number
+            if slot is not None:
+                q.qid = slot.qid
+                q.max_score = float(slot.max)
+                seen.add(_norm_qid(slot.qid))
+            else:
+                report.questions.remove(q)
         for n, it in canon.items():
             if n not in seen:
                 report.questions.append(QuestionMark(

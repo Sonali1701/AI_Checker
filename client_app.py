@@ -123,13 +123,17 @@ def _orient_doc(url: str, token: str, data: bytes, filename: str) -> bytes:
         r = requests.post(f"{url}/ai/orient", files=files,
                           headers={"Authorization": f"Bearer {token}"}, timeout=120)
         if r.status_code != 200:
+            print(f"[orient] {filename}: /ai/orient HTTP {r.status_code} — left as-is "
+                  f"(is the proxy redeployed with /ai/orient?)")
             return data
         rots = r.json().get("rotations") or []
+        print(f"[orient] {filename}: rotations={rots}")
         if not any(rots):
             return data
         new, _, changed = normalize_orientation(data, filename, rotations=rots)
         return new if changed else data
-    except Exception:
+    except Exception as e:
+        print(f"[orient] {filename}: skipped ({e})")
         return data
 
 
