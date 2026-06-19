@@ -47,6 +47,19 @@ def _thinking_config():
     return None
 
 
+def _no_thinking_config():
+    """ThinkingConfig that DISABLES thinking (budget 0), or None if unsupported. The
+    orientation probe is a pure perception task that needs no reasoning, and on 2.5 Flash
+    the default dynamic thinking would otherwise consume the tiny output budget and TRUNCATE
+    the JSON array (the [90, 90 cut-off we saw)."""
+    try:
+        if "thinking_budget" in types.ThinkingConfig.model_fields:
+            return types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
+    return None
+
+
 def _make_client(api_key: str | None, use_vertex: bool,
                  project: str | None = None, location: str | None = None) -> genai.Client:
     """Three modes:
@@ -105,29 +118,36 @@ def orientation_probe(
         # gets a lazy "yes". Force a concrete judgement off the geometry of the writing.
         parts = [_text_part(
             "Each image is one page of a HANDWRITTEN exam. Some pages were photographed "
-            "SIDEWAYS or upside-down. For EACH image, in order, tell me how to make the "
-            "handwriting upright.\n"
-            "Decide from the GEOMETRY, not from whether you can read it:\n"
-            "- If the lines of writing already run left-to-right horizontally → 0\n"
-            "- If the page must be turned a QUARTER-TURN ANTICLOCKWISE to read it (the "
-            "writing currently runs bottom-to-top) → 90\n"
-            "- If it is UPSIDE DOWN → 180\n"
-            "- If it must be turned a quarter-turn CLOCKWISE (writing runs top-to-bottom) → 270\n"
+            "SIDEWAYS or upside-down. For EACH image, in order, output the COUNTER-CLOCKWISE "
+            "rotation (0, 90, 180, or 270 degrees) that makes the handwriting upright.\n"
+            "Judge from the GEOMETRY of the writing, not from whether you can read it. Look at "
+            "which way the TOPS of the letters point:\n"
+            "- Lines run left-to-right, letter-tops point UP (already upright) → 0\n"
+            "- Writing runs top-to-bottom, letter-tops point RIGHT → 90\n"
+            "- Writing is upside-down, letter-tops point DOWN → 180\n"
+            "- Writing runs bottom-to-top, letter-tops point LEFT → 270\n"
             "A page photographed in landscape (wider than tall) is almost always 90 or 270, "
             "NOT 0. Reply with ONLY a JSON array of these integers, one per image, in order, "
-            "e.g. [90, 90, 0]."
+            "e.g. [90, 270, 0]."
         )]
         for p in page_pngs:
             parts.append(_image_part(_downscale_for_model(p, max_edge=900)))
+        # Disable thinking (perception task) AND give a generous output cap, so the JSON
+        # array can't be truncated by reasoning tokens the way [90, 90 was.
+        cfg_kwargs = dict(temperature=0, max_output_tokens=2000)
+        _ntc = _no_thinking_config()
+        if _ntc is not None:
+            cfg_kwargs["thinking_config"] = _ntc
         resp = client.models.generate_content(
             model=model,
             contents=[types.Content(role="user", parts=parts)],
-            config=types.GenerateContentConfig(temperature=0, max_output_tokens=200),
+            config=types.GenerateContentConfig(**cfg_kwargs),
         )
         raw = (resp.text or "").strip()
-        m = re.search(r"\[[^\]]*\]", raw)
-        arr = json.loads(m.group(0)) if m else []
-        for v in arr:
+        # Tolerate a truncated array (no closing ]) — pull the integers in order either way.
+        m = re.search(r"\[[^\]]*\]", raw) or re.search(r"\[[^\]]*$", raw)
+        segment = m.group(0) if m else raw
+        for v in re.findall(r"-?\d+", segment):
             try:
                 iv = int(v) % 360
             except (TypeError, ValueError):
