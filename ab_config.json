@@ -1,0 +1,16 @@
+{
+  "student_class": "10",
+  "subject": "Physics",
+  "question_paper": "C:/Users/vs510/Downloads/ilovepdf_split-range (1)/Biology - Copy of Board Subjective Test_UDAAN INFINITY_Biolgy_10th_May-1-2.pdf",
+  "answer_key": "C:/Users/vs510/Downloads/ilovepdf_split-range (1)/Biology - Copy of Board Subjective Test_UDAAN INFINITY_Biolgy_10th_May-3.pdf",
+  "answer_key_text": "",
+  "marks_scheme_from": "qp",
+  "student_sheets": [
+    "C:/Users/vs510/Downloads/cae14a76-a150-457f-af63-79c73f236164.pdf"
+  ],
+  "variants": [
+    {"label": "Pro-4096",    "model": "gemini-2.5-pro",   "thinking_budget": 4096},
+    {"label": "Flash-8192",  "model": "gemini-2.5-flash", "thinking_budget": 8192},
+    {"label": "Flash-12288", "model": "gemini-2.5-flash", "thinking_budget": 12288}
+  ]
+}

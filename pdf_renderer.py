@@ -2046,56 +2046,108 @@ def _draw_inline_annotations(page: fitz.Page, annotations: list,
             _draw_strikethrough(page, x, y, width or 40.0)
 
 
-def _draw_report_panel(page: fitz.Page, rect: fitz.Rect, report: GradeReport) -> None:
-    """Draw the whole report — EVALUATED banner, total, remarks, per-question totals, and
-    where-marks-were-lost — into `rect`, a full-width panel on the LEFT of page 1. Replaces
-    the old standalone cover + summary pages. Sizes scale with the panel height so the panel
-    matches the student sheet and the first page reads as one uniform sheet."""
-    x0, y0, W, H = rect.x0, rect.y0, rect.width, rect.height
-    s = max(0.7, min(1.3, H / 842.0))           # scale relative to the old A4 cover layout
-    pad = 34 * s
-    x = x0 + pad
-    colw = min(W - 2 * pad, 680 * s)            # keep lines readable on very wide (landscape) sheets
-    bottom = y0 + H - pad
+# ---------- Report strip across the TOP of page 1 ----------
+# Replaces the old standalone cover + summary pages. A wide LANDSCAPE band sits on top of
+# the first answer-sheet page (same width as the sheet), so the page just gets taller. The
+# report content is laid out in three columns to fit the short band: Remarks | Question-wise
+# Totals | Where marks were lost, under an EVALUATED banner + total score.
+_RS_PAD = 20.0          # outer padding
+_RS_GUT = 26.0          # gutter between columns
+_RS_BANNER_H = 40.0
+_RS_TOTAL_SIZE = 17.0
+_RS_HEAD_SIZE = 11.5
+_RS_BODY_SIZE = 9.5
+_RS_LINE = 14.0         # generous per-line height for measuring (>= helpers' real line height)
 
-    bh = 54 * s
-    page.draw_rect(fitz.Rect(x, y0 + pad, x0 + W - pad, y0 + pad + bh), color=RED, width=2 * s)
-    tw = fitz.get_text_length("EVALUATED", fontname="hebo", fontsize=30 * s)
-    page.insert_text((x0 + (W - tw) / 2, y0 + pad + bh * 0.66), "EVALUATED",
-                     fontsize=30 * s, color=RED, fontname="hebo")
-    y = y0 + pad + bh + 36 * s
 
-    page.insert_text((x, y), f"Total Score: {report.total_score} / {report.max_total}",
-                     fontsize=20 * s, color=RED, fontname="hebo")
-    y += 34 * s
+def _rs_columns(x0: float, W: float) -> tuple[float, list[float]]:
+    """Return (column width, [x of each of the 3 columns]) for a strip starting at x0."""
+    col_w = (W - 2 * _RS_PAD - 2 * _RS_GUT) / 3
+    xs = [x0 + _RS_PAD + i * (col_w + _RS_GUT) for i in range(3)]
+    return col_w, xs
 
-    page.insert_text((x, y), "Remarks:", fontsize=13 * s, color=BLACK, fontname="hebo")
-    y = _draw_bulleted_remarks(page, x, y + 18 * s, report.overall_remarks,
-                               size=10.5 * s, color=BLACK, max_width=colw)
 
-    y += 20 * s
-    page.insert_text((x, y), "Question-wise Totals:", fontsize=13 * s, color=BLACK, fontname="hebo")
-    y += 19 * s
-    for sec in report.section_totals:
-        if y > bottom:
-            break
-        line = f"{sec.get('qid', '?')}: {sec.get('score', 0)} / {sec.get('max_score', 0)}"
-        page.insert_text((x + 14 * s, y), line, fontsize=11 * s, color=RED, fontname="hebo")
-        y += 17 * s
+def _rs_wrap_count(text: str, max_w: float, size: float, fontname: str = "helv") -> int:
+    words = (text or "").split()
+    if not words:
+        return 0
+    line, n = "", 0
+    for w in words:
+        trial = (line + " " + w).strip()
+        if fitz.get_text_length(trial, fontname=fontname, fontsize=size) > max_w:
+            n += 1
+            line = w
+        else:
+            line = trial
+    return n + (1 if line else 0)
 
-    lost = [q for q in report.questions
+
+def _rs_bullet_lines(text: str, max_w: float, size: float) -> int:
+    if not text or not text.strip():
+        return 0
+    text = text.replace("The student", "You").replace("the student", "you")
+    total = 0
+    for s in (s.strip() for s in text.split('.') if s.strip()):
+        if not s.endswith(('?', '!')):
+            s += '.'
+        total += max(1, _rs_wrap_count(s, max_w - 20, size))
+    return total
+
+
+def _report_strip_lost(report: GradeReport) -> list:
+    return [q for q in report.questions
             if q.score < q.max_score and (getattr(q, "remark", "") or "").strip()]
-    if lost and y < bottom - 28 * s:
-        y += 16 * s
-        page.insert_text((x, y), "Where marks were lost:", fontsize=13 * s, color=RED, fontname="hebo")
-        y += 18 * s
+
+
+def _report_strip_height(report: GradeReport, W: float) -> float:
+    """Height the top report strip needs for this report at width W (tallest of 3 columns)."""
+    col_w, _ = _rs_columns(0, W)
+    body_start = _RS_PAD + _RS_BANNER_H + 8 + _RS_TOTAL_SIZE + 14
+    c1 = 1 + _rs_bullet_lines(report.overall_remarks, col_w, _RS_BODY_SIZE)
+    c2 = 1 + len(report.section_totals)
+    lost = _report_strip_lost(report)
+    c3 = (1 + sum(_rs_wrap_count(f"{q.qid}: {q.remark}", col_w, _RS_BODY_SIZE) for q in lost)) if lost else 0
+    body_lines = max(c1, c2, c3, 1)
+    return body_start + body_lines * _RS_LINE + _RS_PAD
+
+
+def _draw_report_strip(page: fitz.Page, x0: float, y0: float, W: float, report: GradeReport) -> None:
+    """Draw the whole report into a landscape band at the top of page 1: EVALUATED banner +
+    total score across the top, then three columns (Remarks | Question-wise Totals | Where
+    marks were lost)."""
+    col_w, xs = _rs_columns(x0, W)
+
+    page.draw_rect(fitz.Rect(x0 + _RS_PAD, y0 + _RS_PAD, x0 + W - _RS_PAD, y0 + _RS_PAD + _RS_BANNER_H),
+                   color=RED, width=1.5)
+    tw = fitz.get_text_length("EVALUATED", fontname="hebo", fontsize=24)
+    page.insert_text((x0 + (W - tw) / 2, y0 + _RS_PAD + _RS_BANNER_H * 0.68), "EVALUATED",
+                     fontsize=24, color=RED, fontname="hebo")
+    ty = y0 + _RS_PAD + _RS_BANNER_H + 8 + _RS_TOTAL_SIZE
+    page.insert_text((x0 + _RS_PAD, ty), f"Total Score: {report.total_score} / {report.max_total}",
+                     fontsize=_RS_TOTAL_SIZE, color=RED, fontname="hebo")
+    by = ty + 14   # body (columns) start y
+
+    # Column 1 — Remarks
+    page.insert_text((xs[0], by), "Remarks:", fontsize=_RS_HEAD_SIZE, color=BLACK, fontname="hebo")
+    _draw_bulleted_remarks(page, xs[0], by + _RS_LINE, report.overall_remarks,
+                           size=_RS_BODY_SIZE, color=BLACK, max_width=col_w)
+
+    # Column 2 — Question-wise Totals
+    page.insert_text((xs[1], by), "Question-wise Totals:", fontsize=_RS_HEAD_SIZE, color=BLACK, fontname="hebo")
+    yy = by + _RS_LINE
+    for sec in report.section_totals:
+        page.insert_text((xs[1], yy), f"{sec.get('qid', '?')}: {sec.get('score', 0)} / {sec.get('max_score', 0)}",
+                         fontsize=_RS_BODY_SIZE, color=RED, fontname="hebo")
+        yy += _RS_LINE
+
+    # Column 3 — Where marks were lost
+    lost = _report_strip_lost(report)
+    if lost:
+        page.insert_text((xs[2], by), "Where marks were lost:", fontsize=_RS_HEAD_SIZE, color=RED, fontname="hebo")
+        yy = by + _RS_LINE
         for q in lost:
-            if y > bottom:
-                break
-            page.insert_text((x, y), f"{q.qid}:", fontsize=10.5 * s, color=RED, fontname="hebo")
-            y = _draw_text(page, x + 32 * s, y, q.remark, size=10.5 * s, color=RED,
-                           fontname="helv", max_width=colw - 32 * s)
-            y += 6 * s
+            yy = _draw_text(page, xs[2], yy, f"{q.qid}: {q.remark}", size=_RS_BODY_SIZE,
+                            color=RED, fontname="helv", max_width=col_w)
 
 
 def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
@@ -2200,20 +2252,20 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
         if anns:
             _draw_inline_annotations(page, anns, line_index=line_index)
 
-    # First page gets the report as a full-width LEFT panel (same size as the sheet),
-    # replacing the old standalone cover + summary pages. The already-annotated first page
-    # (with its right marks strip) is placed to the right of the panel; the rest copy as-is.
+    # First page gets the report as a wide LANDSCAPE strip across the TOP (same width as the
+    # sheet), replacing the old standalone cover + summary pages. The already-annotated first
+    # page (with its right marks strip) is placed below the strip; the rest copy as-is.
     n = len(student_doc)
     if n == 0:
-        _draw_report_panel(out.new_page(width=595, height=842), fitz.Rect(0, 0, 595, 842), report)
+        _draw_report_strip(out.new_page(width=842, height=400), 0, 0, 842, report)
     else:
         sw = student_doc[0].rect.width
         sh = student_doc[0].rect.height
-        panel_w = _CONTENT_W.get((id(student_doc), 1), sw)   # report panel = student-sheet width
-        p0 = out.new_page(width=panel_w + sw, height=sh)
-        _draw_report_panel(p0, fitz.Rect(0, 0, panel_w, sh), report)
-        p0.draw_line(fitz.Point(panel_w, 0), fitz.Point(panel_w, sh), color=RED, width=1.0)
-        p0.show_pdf_page(fitz.Rect(panel_w, 0, panel_w + sw, sh), student_doc, 0)
+        strip_h = _report_strip_height(report, sw)
+        p0 = out.new_page(width=sw, height=strip_h + sh)
+        _draw_report_strip(p0, 0, 0, sw, report)
+        p0.draw_line(fitz.Point(0, strip_h), fitz.Point(sw, strip_h), color=RED, width=1.0)
+        p0.show_pdf_page(fitz.Rect(0, strip_h, sw, strip_h + sh), student_doc, 0)
         if n > 1:
             out.insert_pdf(student_doc, from_page=1, to_page=n - 1)
     student_doc.close()
