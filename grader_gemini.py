@@ -76,6 +76,55 @@ def _text_part(text: str) -> types.Part:
     return types.Part.from_text(text=text)
 
 
+def orientation_probe(
+    page_pngs: list[bytes],
+    model: str = "gemini-2.5-flash",
+    api_key: str | None = None,
+    use_vertex: bool = False,
+    project: str | None = None,
+    location: str | None = None,
+) -> list[int]:
+    """Ask a cheap Flash call, in ONE batched request, how to straighten each page.
+
+    Returns the counter-clockwise angle (0/90/180/270) to apply to each page so the
+    writing is upright — same convention as orient.detect_rotation / PIL Image.rotate.
+    Pages are downscaled hard first, so this costs a fraction of a paisa per sheet.
+    Never raises: on any failure it returns all-zeros (leave pages as-is)."""
+    import json
+    import re
+
+    if not page_pngs:
+        return []
+    try:
+        client = _make_client(api_key, use_vertex, project, location)
+        parts = [_text_part(
+            "Below are page images of a handwritten exam, in order. For EACH image decide how "
+            "many degrees of COUNTER-CLOCKWISE rotation make the writing upright and reading "
+            "left-to-right. Allowed values: 0 (already upright), 90, 180, 270. "
+            "Return ONLY a JSON array of integers, one per image, in order. "
+            "Example for three images: [0, 90, 0]"
+        )]
+        for p in page_pngs:
+            parts.append(_image_part(_downscale_for_model(p, max_edge=384)))
+        resp = client.models.generate_content(
+            model=model,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(temperature=0, max_output_tokens=200),
+        )
+        m = re.search(r"\[[^\]]*\]", resp.text or "")
+        arr = json.loads(m.group(0)) if m else []
+        out = []
+        for v in arr:
+            try:
+                iv = int(v) % 360
+            except (TypeError, ValueError):
+                iv = 0
+            out.append(iv if iv in (0, 90, 180, 270) else 0)
+    except Exception:
+        out = []
+    return (out + [0] * len(page_pngs))[: len(page_pngs)]
+
+
 def generate_rubric(
     question_paper_pngs: list[bytes],
     model: str = DEFAULT_MODEL,

@@ -256,20 +256,50 @@ async def evaluate(
     return {"job_id": job_id}
 
 
+def _make_orienter(cfg):
+    """Return f(bytes, filename) -> upright bytes. Uses a cheap Gemini Flash probe when a
+    Google key is available (exact 4-way), else the free heuristic. Never raises."""
+    from orient import normalize_orientation
+
+    probe = None
+    key = os.environ.get("GOOGLE_API_KEY")
+    if key:
+        from grader_gemini import orientation_probe
+        vertex = key.startswith("AQ") or _truthy(os.environ.get("GEMINI_USE_VERTEX"))
+
+        def probe(pngs):
+            return orientation_probe(
+                pngs, model="gemini-2.5-flash", api_key=key, use_vertex=vertex,
+                project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+                location=os.environ.get("GOOGLE_CLOUD_LOCATION"))
+
+    def orient(data: bytes, filename: str) -> bytes:
+        try:
+            return normalize_orientation(data, filename, probe=probe)[0]
+        except Exception:
+            return data
+
+    return orient
+
+
 def _run_job(p: dict) -> None:
     """Background grader: render shared inputs once, grade each sheet, update the job."""
     jid = p["job_id"]
     try:
-        qp_pngs = pdf_or_image_to_pngs(p["qp_bytes"], p["qp_name"])
+        cfg = p["cfg"]
+        provider_label = "Claude" if cfg.is_claude else "Gemini"
+        _orient = _make_orienter(cfg)            # straighten sideways phone photos upright
+
+        qp_bytes = _orient(p["qp_bytes"], p["qp_name"])
+        qp_pngs = pdf_or_image_to_pngs(qp_bytes, p["qp_name"])
         if p["key_source"] == "upload":
-            ak_pngs = pdf_or_image_to_pngs(p["ak_bytes"], p["ak_name"])
+            ak_bytes = _orient(p["ak_bytes"], p["ak_name"])
+            ak_pngs = pdf_or_image_to_pngs(ak_bytes, p["ak_name"])
             ak_text = None
         else:
             ak_pngs = None
             ak_text = p["rubric_text"]
         marks_scheme = marks_scheme_from_items(p["items"])
-        cfg = p["cfg"]
-        provider_label = "Claude" if cfg.is_claude else "Gemini"
 
         for idx, (name, sa_bytes) in enumerate(p["sheets"]):
             with _LOCK:
@@ -277,6 +307,7 @@ def _run_job(p: dict) -> None:
             try:
                 if not sa_bytes:
                     raise ValueError("file came through empty (0 bytes)")
+                sa_bytes = _orient(sa_bytes, name)
                 out = grade_sheet(
                     qp_pngs=qp_pngs, sa_bytes=sa_bytes, filename=name,
                     ak_pngs=ak_pngs, ak_text=ak_text, marks_scheme=marks_scheme, cfg=cfg,

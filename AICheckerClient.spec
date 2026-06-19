@@ -6,7 +6,7 @@ a = Analysis(
     ['run_client.py'],
     pathex=[],
     binaries=[],
-    datas=[('static', 'static')],
+    datas=[('static', 'static'), ('Kalam-Regular.ttf', '.')],
     hiddenimports=[
         # uvicorn resolves these dynamically at runtime, so PyInstaller can't see them.
         'uvicorn.logging',

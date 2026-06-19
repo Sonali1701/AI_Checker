@@ -139,6 +139,29 @@ async def grade_sheet_ep(
     }
 
 
+@app.post("/ai/orient")
+async def orient_ep(
+    pages: list[UploadFile] = File(..., description="Page thumbnails to straighten"),
+    authorization: str | None = Header(default=None),
+):
+    """Return the per-page rotation (CCW degrees: 0/90/180/270) to make each page upright.
+    One cheap batched Gemini Flash call — the client sends downscaled thumbnails and
+    straightens its own pages locally from the returned angles."""
+    _require_user(authorization)
+    pngs = [await f.read() for f in pages]
+    if not pngs:
+        return {"rotations": []}
+    from grader_gemini import orientation_probe
+    cfg = cfg_from_request("gemini", "gemini-2.5-flash", "", "")   # always Flash — cheapest
+    try:
+        rot = orientation_probe(pngs, model="gemini-2.5-flash", api_key=cfg.resolved_key(),
+                                use_vertex=cfg.gemini_vertex, project=cfg.project,
+                                location=cfg.location)
+    except Exception:
+        rot = [0] * len(pngs)
+    return {"rotations": rot}
+
+
 @app.post("/ai/generate-rubric")
 async def rubric_ep(
     qp: list[UploadFile] = File(...),

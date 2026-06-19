@@ -28,13 +28,16 @@ import requests
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from io import BytesIO
+from PIL import Image
 
 from costs import DEFAULT_USD_TO_INR
 from grader import (
     GradeReport, marks_scheme_from_items, marks_scheme_from_pdf, pdf_or_image_to_pngs,
 )
 from mathpix import pageocr_from_dict
-from pdf_renderer import build_evaluated_pdf
+from orient import normalize_orientation
+from pdf_renderer import _CURSIVE_FONT_FILE, build_evaluated_pdf
 
 # NOTE: this client deliberately does NOT import `pipeline` / the AI graders. It never
 # calls an LLM directly (that's the proxy's job), so it stays free of the anthropic /
@@ -98,6 +101,38 @@ def _png_files(field: str, pngs: list[bytes]) -> list:
     return [(field, (f"{field}{i}.png", b, "image/png")) for i, b in enumerate(pngs)]
 
 
+def _thumb_png(png: bytes, max_side: int = 400) -> bytes:
+    img = Image.open(BytesIO(png)).convert("RGB")
+    w, h = img.size
+    s = max_side / max(w, h)
+    if s < 1:
+        img = img.resize((max(1, int(w * s)), max(1, int(h * s))))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _orient_doc(url: str, token: str, data: bytes, filename: str) -> bytes:
+    """Straighten a document upright at ingest using the proxy's cheap orientation probe.
+    Sends only small thumbnails; rebuilds the doc locally from the returned angles. Returns
+    the original bytes unchanged if nothing needs rotating or on any failure (graceful —
+    a flaky probe must never block grading)."""
+    try:
+        pngs = pdf_or_image_to_pngs(data, filename, dpi=100)
+        files = [("pages", (f"p{i}.png", _thumb_png(p), "image/png")) for i, p in enumerate(pngs)]
+        r = requests.post(f"{url}/ai/orient", files=files,
+                          headers={"Authorization": f"Bearer {token}"}, timeout=120)
+        if r.status_code != 200:
+            return data
+        rots = r.json().get("rotations") or []
+        if not any(rots):
+            return data
+        new, _, changed = normalize_orientation(data, filename, rotations=rots)
+        return new if changed else data
+    except Exception:
+        return data
+
+
 def _grade_via_proxy(*, url: str, token: str, qp_pngs, sa_pngs, ak_pngs, ak_text,
                      marks_scheme_json: str, provider: str, model: str,
                      student_class: str, subject: str, student_file: str,
@@ -146,6 +181,8 @@ def config():
         "default_usd_to_inr": DEFAULT_USD_TO_INR,
         "mode": "client",
         "proxy_configured": bool(cfg["proxy_url"] and cfg["token"]),
+        # which handwriting font the evaluated PDF will use (Kalam-Regular.ttf when bundled)
+        "remark_font": os.path.basename(_CURSIVE_FONT_FILE) if _CURSIVE_FONT_FILE else None,
     }
 
 
@@ -271,10 +308,15 @@ def _run_job(p: dict) -> None:
     """Render shared inputs once locally, grade each sheet via the proxy, build the
     evaluated PDF locally, update the in-memory job."""
     jid = p["job_id"]
+    url, token = p["url"], p["token"]
     try:
-        qp_pngs = pdf_or_image_to_pngs(p["qp_bytes"], p["qp_name"])
+        # Straighten shared inputs ONCE (a rotated/sideways phone photo otherwise grades
+        # badly and its marks land askew). Per-sheet straightening happens in the loop.
+        qp_bytes = _orient_doc(url, token, p["qp_bytes"], p["qp_name"])
+        qp_pngs = pdf_or_image_to_pngs(qp_bytes, p["qp_name"])
         if p["key_source"] == "upload":
-            ak_pngs = pdf_or_image_to_pngs(p["ak_bytes"], p["ak_name"])
+            ak_bytes = _orient_doc(url, token, p["ak_bytes"], p["ak_name"])
+            ak_pngs = pdf_or_image_to_pngs(ak_bytes, p["ak_name"])
             ak_text = None
         else:
             ak_pngs = None
@@ -288,6 +330,7 @@ def _run_job(p: dict) -> None:
             try:
                 if not sa_bytes:
                     raise ValueError("file came through empty (0 bytes)")
+                sa_bytes = _orient_doc(url, token, sa_bytes, name)       # straighten if sideways
                 sa_pngs = pdf_or_image_to_pngs(sa_bytes, name)           # LOCAL render
                 resp = _grade_via_proxy(
                     url=p["url"], token=p["token"], qp_pngs=qp_pngs, sa_pngs=sa_pngs,

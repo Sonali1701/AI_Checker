@@ -20,10 +20,17 @@ GREEN = RED
 
 # ---------- Kalam font for handwritten remarks & marks ----------
 
-_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+import sys as _sys
 
-# Use Kalam font from project folder
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+# When frozen by PyInstaller, bundled data (Kalam-Regular.ttf) lives in sys._MEIPASS, not
+# next to this module — check there FIRST so the EXE uses Kalam instead of falling back to
+# a Windows cursive font (Segoe Script).
+_BUNDLE_DIR = getattr(_sys, "_MEIPASS", _PROJECT_DIR)
+
+# Use Kalam font from the bundle / project folder.
 _CURSIVE_FONT_CANDIDATES = [
+    os.path.join(_BUNDLE_DIR, "Kalam-Regular.ttf"),   # bundled into the EXE
     os.path.join(_PROJECT_DIR, "Kalam-Regular.ttf"),  # Kalam font in project folder
     os.path.join(_PROJECT_DIR, "kalam_regular.ttf"),  # Alternative lowercase filename
     os.path.join(_PROJECT_DIR, "fonts", "cursive.ttf"),

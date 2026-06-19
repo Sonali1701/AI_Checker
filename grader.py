@@ -748,6 +748,17 @@ _QNUM_RE = re.compile(r"^\s*(\d{1,2})\s*[.)]")
 _SUBLETTER_RE = re.compile(r"^\s*\(?([a-h])\)")
 # Roman sub-part "(i)".."(x)" — lowercase only.
 _SUBROMAN_RE = re.compile(r"^\s*\(?(i{1,3}|iv|v|vi{0,3}|ix|x)\)")
+# Lenient tag for a MALFORMED bracket — "[2 Marks" with the closing "]" missing (a real
+# typo seen on papers). Requires an opening bracket + the word "mark", so it can't match
+# stray prose. Used only when the strict tag found nothing on the line.
+_MARKS_TAG_OPEN_RE = re.compile(r"[\[(]\s*(\d+(?:\.\d+)?)\s*marks?\b", re.IGNORECASE)
+# A "N Mark(s) Each" heading that sets the per-question marks for a whole block (e.g.
+# "Multiple Choice Questions: [1 Mark Each]") instead of tagging each question.
+_MARKS_EACH_RE = re.compile(r"(\d+(?:\.\d+)?)\s*marks?\s+each", re.IGNORECASE)
+# Section headings that END a "… Each" block (the next section is marked differently).
+_SECTION_HDR_RE = re.compile(
+    r"(answer\s+type|very\s+short|short\s+answer|long\s+answer|case\s+study|section\b)",
+    re.IGNORECASE)
 
 
 def total_marks_from_text(pages_text: list[str]) -> float | None:
@@ -809,34 +820,69 @@ def marks_scheme_from_text(pages_text: list[str]) -> MarksScheme:
     seen: set[str] = set()
     cur_q: int | None = None
     cur_sub: str | None = None
+    qtext: dict[int, str] = {}        # top-level qnum -> the question's text (for the "what it is" column)
 
     def _sub_on(s: str) -> str | None:
         m = _SUBROMAN_RE.match(s) or _SUBLETTER_RE.match(s)
         return m.group(1).lower() if m else None
 
+    def _clean(s: str) -> str:
+        return _MARKS_TAG_OPEN_RE.sub("", _MARKS_TAG_RE.sub("", s)).strip(" .:-)")[:60]
+
+    # Pass 1: explicit per-question "[N Marks]" tags (strict, then lenient for an unclosed
+    # bracket). "… Each" heading lines are skipped here — they're handled in pass 2. Also
+    # remember each question's TEXT (off its number line) for the editable table's label.
     for page in pages_text:
         for raw in page.splitlines():
             line = raw.strip()
-            if not line:
+            if not line or _MARKS_EACH_RE.search(line):
                 continue
             mq = _QNUM_RE.match(line)
             if mq:
                 cur_q = int(mq.group(1))
-                # A sub-part may sit on the same line, e.g. "16. (a) Prove ...".
-                cur_sub = _sub_on(line[mq.end():].lstrip())
+                cur_sub = _sub_on(line[mq.end():].lstrip())   # e.g. "16. (a) Prove ..."
+                rem = _clean(line[mq.end():])
+                if rem and cur_q not in qtext:
+                    qtext[cur_q] = rem
             else:
                 sub = _sub_on(line)
                 if sub is not None:
                     cur_sub = sub
-            for mm in _MARKS_TAG_RE.finditer(line):
+            matches = list(_MARKS_TAG_RE.finditer(line)) or list(_MARKS_TAG_OPEN_RE.finditer(line))
+            for mm in matches:
                 if cur_q is None:
                     continue
                 qid = f"Q{cur_q}" + (f".{cur_sub}" if cur_sub else "")
                 if qid in seen:
                     continue
                 seen.add(qid)
-                desc = _MARKS_TAG_RE.sub("", line).strip(" .:-")[:60]
+                desc = qtext.get(cur_q) or _clean(line)        # prefer the question text
                 items.append(MarksItem(qid=qid, max=float(mm.group(1)), description=desc))
+
+    # Pass 2: "N Mark(s) Each" headings — apply N to every top-level question in that block
+    # (e.g. the MCQs under "Multiple Choice Questions: [1 Mark Each]") that wasn't tagged
+    # explicitly. The block ends at the next "Each" heading or section heading.
+    cur_each: float | None = None
+    for page in pages_text:
+        for raw in page.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            me = _MARKS_EACH_RE.search(line)
+            if me:
+                v = float(me.group(1))
+                cur_each = v if 0 < v <= 10 else None
+                continue
+            if _SECTION_HDR_RE.search(line):
+                cur_each = None
+                continue
+            mq = _QNUM_RE.match(line)
+            if mq and cur_each is not None:
+                qn = int(mq.group(1))
+                qid = f"Q{qn}"
+                if qid not in seen:
+                    seen.add(qid)
+                    items.append(MarksItem(qid=qid, max=cur_each, description=qtext.get(qn, "")))
 
     return MarksScheme(total=round(sum(it.max for it in items), 3), items=items)
 
