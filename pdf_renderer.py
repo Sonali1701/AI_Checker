@@ -1347,6 +1347,15 @@ def _draw_bulleted_remarks(page: fitz.Page, x: float, y: float, text: str, *,
 # transcribe line by line (hand-drawn ledgers, statements, figures).
 _DIAG_REGION_RE = re.compile(r"^P\d+D\d+$")
 
+# A line that OPENS a numbered or lettered point: "(a) ", "ii. ", "3) ", "- ".
+# Anchored to the start on purpose - "(a)" cited mid-sentence is prose, and only a
+# line that begins a point is a point a teacher would tick.
+_ENUM_LINE_RE = re.compile(
+    r"^\s*(?:\(\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})\s*\)"
+    r"|(?:[a-z]|[ivx]{1,4}|\d{1,2})\s*[).]"
+    r"|[-\u2022*])\s+\S",
+    re.IGNORECASE)
+
 
 _MARK_PAD = 8.0          # breathing room between a mark and the writing beside it
 _MIN_DROP_BAND = 13.0    # a gap below the row has to be this tall to hold a mark
@@ -1661,6 +1670,16 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             ("=", "→", "⇒", "×", "÷", "√", "^", "∴", "Ω", "Rs", "%"))
         or (digits >= 6 and digits >= 0.18 * (digits + letters))
     )
+    # An ENUMERATED answer is marked point by point too, even with no arithmetic in
+    # it: "state five significances of a mission statement", "list three differences"
+    # - each point is its own line and earns its own tick, which is how a teacher
+    # marks one. The grader is told to set mark_style "per_step" for these, but when
+    # it leaves the call to us a theory list has no maths symbol to look numerical
+    # by, so the whole answer used to collect a single tick.
+    # Three markers, not two: an "(a) ... (b)" aside inside a paragraph is prose.
+    enumerated = sum(1 for pl in my_lines
+                     if _ENUM_LINE_RE.match(str(pl.get("text") or "")))
+    looks_enumerated = enumerated >= 3 and enumerated >= len(criteria) / 2.0
     real = [pl for pl in my_lines if not _is_header(pl.get("text") or "")]
     anchor_lines = real or my_lines
 
@@ -1685,7 +1704,8 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     elif mark_style in ("single", "whole"):
         base_step = False                        # flowing prose — one tick + total
     else:                                        # "auto": infer from the content
-        base_step = len(criteria) > 1 and looks_numerical
+        base_step = (len(criteria) > 1
+                     and (looks_numerical or looks_enumerated))
     # Per-step ticks are only for BIG answers (>= 3 marks). A 1- or 2-mark question
     # gets a single tick + total — teachers don't break 2 marks into "1+1" on the page.
     MIN_MARKS_FOR_STEP = 3
