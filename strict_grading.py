@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 from exam_package import ExamPackage, PackageIssue, normalize_qid
+from grader import QuestionMark
 
 
 class StrictGradeError(RuntimeError):
@@ -732,15 +733,59 @@ def reconcile_report_to_package(
                 for qid in option.question_ids
             )
 
-    missing = [question.qid for key, question in canonical.items()
+    missing = [key for key, question in canonical.items()
                if key in counted and key not in seen]
     if missing:
-        # A missing model row is not proof that the student left it blank.  The answer-map
-        # stage must establish a confident blank; the compatibility path has no such proof.
-        raise StrictGradeError(
-            "QUESTION_NOT_GRADED",
-            "The grader omitted package question(s): " + ", ".join(missing[:12]),
-        )
+        # A missing model row is not proof that the student left it blank, so this
+        # used to hold the whole copy. That threw away good copies: a CA Corporate
+        # Laws script came back ungradable because the grader wrote no row for Q1.c
+        # and Q3.b - the two sub-parts the student left blank - while Q1.a, Q1.b and
+        # Q3.a were all marked correctly. Nobody reviews a held copy, so the student
+        # got nothing for a paper that was fully and correctly marked. Three other
+        # runs of that same script released, which is the tell: whether the grader
+        # bothers to emit a zero row for a blank sub-part is not stable.
+        #
+        # `find_unmarked_answers` already settled what such a row means, on this very
+        # pair of questions: "a sub-part whose SIBLING was attempted is already
+        # explained by that sibling's writing... Leaving some sub-parts blank is
+        # ordinary, and on a choice paper it is the norm." Apply that here. A blank
+        # part of a question the student DID answer is theirs to lose, at the mark
+        # the paper prints for it.
+        #
+        # What still holds the copy: a question with no attempted sibling anywhere.
+        # Nothing explains those, and an entire answer the grader never read must not
+        # be silently zeroed - that is the Chemistry copy this gate exists for. An
+        # answer the map LOCATED is refused earlier still, before we ever get here.
+        attempted_tops = {
+            _top(question.qid) for question in report.questions
+            if bool(getattr(question, "attempted", True))
+        }
+        pages = {}
+        for question in report.questions:
+            top = _top(question.qid)
+            pages[top] = max(pages.get(top, 1), int(getattr(question, "page", 1) or 1))
+        booked, unexplained = [], []
+        for key in missing:
+            spec = canonical[key]
+            if _top(spec.qid) in attempted_tops:
+                booked.append(spec)
+            else:
+                unexplained.append(spec.qid)
+        if unexplained:
+            raise StrictGradeError(
+                "QUESTION_NOT_GRADED",
+                "The grader omitted package question(s): " + ", ".join(unexplained[:12]),
+            )
+        for spec in booked:
+            report.questions.append(QuestionMark(
+                qid=spec.qid, score=0.0, max_score=float(spec.max_marks),
+                page=pages.get(_top(spec.qid), 1), y_fraction=0.5,
+                remark="Not attempted", attempted=False,
+            ))
+        # Said out loud, not silently: this is a claim about the student's script,
+        # and the copy carries it as "Not attempted" for them to dispute.
+        print(f"[reconcile] booked blank sub-part(s) of answered questions as 0: "
+              f"{', '.join(spec.qid for spec in booked)}", flush=True)
 
     if package.choice_groups and finalize_choices:
         # Rows from extra attempted alternatives remain useful evidence internally but
