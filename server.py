@@ -23,6 +23,7 @@ import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
+import mathpix
 import pw_access
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -935,6 +936,11 @@ async def evaluate(
             "error": None,
             "results": [],
             "pdfs": {},
+            # The graded report and the OCR that placed its marks. Held so a renderer
+            # fix can be verified by re-drawing the copy (tools/rerender.py) instead of
+            # paying to grade the sheet a second time. Three copies went to faculty
+            # carrying a strip fault that landed hours later, and could not be redrawn.
+            "reports": {},
             "key": download_key,
             "created": time.time(),
             "state": WorkflowState.RECEIVED.value,
@@ -1359,6 +1365,11 @@ def _run_job(payload: dict) -> None:
                 result["workflow"] = flow.snapshot()
                 with _LOCK:
                     JOBS[job_id]["pdfs"][index] = result_data["pdf_bytes"]
+                    JOBS[job_id]["reports"][index] = {
+                        "report": report.model_dump(mode="json"),
+                        "ocr": [mathpix.pageocr_to_dict(page)
+                                for page in (result_data.get("ocr_pages") or [])],
+                    }
             except StrictGradeError as exc:
                 _log_error(f"automatic grading could not verify {name}", exc)
                 if flow.state not in (WorkflowState.UNGRADABLE, WorkflowState.FAILED,
@@ -1576,6 +1587,20 @@ def job_pdf(job_id: str, index: int, k: str = ""):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="evaluated_{stem}.pdf"'},
     )
+
+
+@app.get("/api/jobs/{job_id}/report/{index}")
+def job_report(job_id: str, index: int, k: str = ""):
+    """The graded report and cached OCR for one sheet, for a free re-render.
+
+    Deliberately NOT part of the status payload: that is polled every two seconds
+    for the life of the batch, and a report runs to hundreds of kilobytes.
+    """
+    job = _job_or_404(job_id, k)
+    saved = (job.get("reports") or {}).get(index)
+    if saved is None:
+        raise HTTPException(404, "No saved report for that sheet.")
+    return saved
 
 
 @app.get("/api/jobs/{job_id}/zip")

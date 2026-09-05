@@ -229,6 +229,27 @@ def run_case(case: dict, headers: dict[str, str]) -> None:
     output_pdf = case_dir / f"evaluated_{case['slug']}.pdf"
     output_pdf.write_bytes(response.content)
 
+    # Save what the copy was drawn FROM, not just the drawing. A renderer fix that
+    # lands after a batch is worthless if verifying it means paying to grade the
+    # sheet again - with these two files tools/rerender.py redraws it for nothing.
+    saved = requests.get(
+        f"{BASE_URL}/api/jobs/{job_id}/report/{result['index']}",
+        params={"k": job_key},
+        timeout=180,
+    )
+    if saved.ok:
+        body = saved.json()
+        (case_dir / "report.json").write_text(
+            json.dumps(body.get("report") or {}, indent=1, ensure_ascii=False),
+            encoding="utf-8")
+        (case_dir / "ocr.json").write_text(
+            json.dumps(body.get("ocr") or [], ensure_ascii=False), encoding="utf-8")
+    else:
+        # Not fatal - the evaluated copy is already on disk and is what the batch is
+        # for. Say so plainly, because it means the next renderer fix costs money.
+        print(f"[{case['slug']}] WARNING: report not saved "
+              f"({saved.status_code}); a re-render will need a paid re-grade",
+              flush=True)
     cost = result.get("cost") or {}
     print(
         f"[{case['slug']}] RELEASED score={result.get('score')}/{result.get('max')} "
