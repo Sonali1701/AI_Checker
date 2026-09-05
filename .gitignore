@@ -7,6 +7,7 @@ service_account.json
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 venv/
 
@@ -15,14 +16,52 @@ venv/
 
 # Student data / uploads / generated sheets — never commit (PII)
 *.pdf
+# A page image rendered from an answer sheet IS the answer sheet: the
+# student's handwriting, name and marks. Review runs produce them by the
+# hundred beside the copies they check.
+*.png
 
 # Editor/agent state + archives (not needed in the repo)
 .claude/
 *.zip
 
-# PyInstaller build output (the EXE is large; distribute it outside git)
+# PyInstaller output (the EXE is distributed outside git)
 build/
 dist/
+/build_final_*/
+/dist_new/
+/release_final_*/
+*.log
 
-# Per-user client config holds a personal access token — never commit
+# Local public OAuth configuration used for desktop packaging
+/pw_oauth_config.json
+
+# Per-user authentication/configuration
 client_config.json
+token.txt
+/build_log.txt
+
+# Generated accuracy/benchmark runs (inputs may contain student PII)
+/ab_fanout*/
+/ab_scheme/
+/ab_single/
+/bl_*/
+/ca_audit_*/
+/ca_final/
+/ca_run*/
+/ca_v*/
+/ca100_*/
+/cache_run*/
+/chem*/
+/claude_*/
+/commerce_*/
+/coremaths_mat/
+/eval_ca_*/
+/eval_commerce_out/
+/haiku_commerce/
+/pilot_*/
+/sweep_*/
+
+# Outputs from retired/manual rendering probes
+/test_*.pdf
+/test_*.png
