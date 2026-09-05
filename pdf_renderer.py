@@ -1,14 +1,17 @@
 """Render the evaluated PDF: cover page + annotated student pages + summary page."""
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import math
 import os
 import re
+import threading
 from io import BytesIO
 
 import fitz  # PyMuPDF
 
+from anchors import resolve_steps
 from grader import GradeReport
 from mathpix import PageOCR
 
@@ -16,6 +19,105 @@ RED = (0.80, 0.08, 0.10)
 BLACK = (0, 0, 0)
 # Backwards compat — anything that still imports GREEN gets red instead.
 GREEN = RED
+
+# Inline tick / cross / circled-mark size multiplier for the sheet being rendered.
+# CA and commerce answers are dense, tabular and small-handwritten, so the default
+# school-sized marks cover the working. A ContextVar (not a plain global) keeps the
+# value per-thread, so two jobs rendering different papers can't clobber each other.
+_MARK_SCALE: contextvars.ContextVar[float] = contextvars.ContextVar("mark_scale", default=1.0)
+_SAFE_LAYOUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "safe_layout", default=False)
+_RENDER_LOCK = threading.Lock()
+
+
+def _ms(size: float) -> float:
+    """Scale an inline-mark dimension for the current sheet."""
+    return size * _MARK_SCALE.get()
+
+
+# A teacher's tick is as big as the answer it sits beside: a broad one across a
+# spread-out line, a small one down the rows of a ledger. The nominal is the median
+# OCR line height on a real copy; the clamp keeps a merged OCR block (which can come
+# back hundreds of points tall) from drawing a tick across the whole page.
+_NOMINAL_LINE_H = 22.0
+_TICK_SCALE_MIN = 0.70
+_TICK_SCALE_MAX = 1.55
+
+# ...and a tick that stands for a WHOLE answer also grows with how much was written.
+# A teacher's tick beside a one-line definition is not the tick they put on a page of
+# working. Square-rooted, because a twelve-line answer does not earn four times the
+# tick of a three-line one, and clamped at both ends so a long answer in large
+# handwriting cannot compound into a tick drawn across the page.
+_NOMINAL_ANSWER_LINES = 3.0
+_LENGTH_SCALE_MIN = 0.75
+_LENGTH_SCALE_MAX = 1.55
+_TICK_TOTAL_MIN = 0.65
+_TICK_TOTAL_MAX = 1.70
+
+
+def _answer_length_scale(answer_lines: int) -> float:
+    """How much a whole-answer tick grows with the length of the answer."""
+    if not answer_lines or answer_lines <= 0:
+        return 1.0
+    factor = math.sqrt(answer_lines / _NOMINAL_ANSWER_LINES)
+    return min(_LENGTH_SCALE_MAX, max(_LENGTH_SCALE_MIN, factor))
+
+
+def _row_writing_end(by_lid: dict, page_num: int, y0: float, y1: float,
+                     own_x0: float, own_x1: float, content_w: float) -> float:
+    """Rescue a tick that would otherwise be stranded in the left margin.
+
+    A step can be anchored to a stub — a bare "(c)" label sits in the OCR as its own
+    line ending at x=208 — and placing the tick just past it left it in the left
+    margin of a released Core Maths page while the working it marked ran on to 1199.
+
+    Deliberately narrow. A ledger row is many short cells, and taking the widest line
+    on the row would drag the tick off the amount it is about and out to the far edge
+    of the table, which is wrong on exactly the papers that are mostly tables. So this
+    only fires on the stranding symptom: the anchor ends in the left third of the page
+    AND the row carries writing well beyond it.
+    """
+    # A label is NARROW as well as far left. Position alone is not enough: the
+    # particulars cell of a ledger row also ends in the left third, and dragging its
+    # tick to the far edge of the table would be wrong on exactly the papers that are
+    # mostly tables.
+    if own_x1 > 0.35 * content_w or (own_x1 - own_x0) > 0.12 * content_w:
+        return own_x1
+    end = own_x1
+    for line in by_lid.values():
+        if line.get("page") != page_num:
+            continue
+        overlap = min(y1, line["y1"]) - max(y0, line["y0"])
+        if overlap > 0.4 * min(y1 - y0, line["y1"] - line["y0"]):
+            end = max(end, line["x1"])
+    return end if end > own_x1 + 0.25 * content_w else own_x1
+
+
+def _tick_size_for_line(base: float, line_h: float, answer_lines: int = 0) -> float:
+    """Scale an inline tick/cross to the writing it marks.
+
+    `line_h` is the height of the line it sits on — how big this student writes.
+    `answer_lines` is how many lines the answer runs to, and applies only to a mark
+    standing for a WHOLE answer: a step tick marks one line, so its scope is that
+    line however long the answer around it is.
+    """
+    factor = 1.0
+    if line_h and line_h > 0:
+        factor = min(_TICK_SCALE_MAX, max(_TICK_SCALE_MIN, line_h / _NOMINAL_LINE_H))
+    if answer_lines and answer_lines > 0:
+        factor = min(_TICK_TOTAL_MAX,
+                     max(_TICK_TOTAL_MIN, factor * _answer_length_scale(answer_lines)))
+    return _ms(base) * factor
+
+
+# One hand marks the whole sheet. A step mark and a whole-answer mark may differ —
+# the second stands for more — but not by so much that they read as two different
+# markers. They were 8 and 13 (a 1.6x gap in drawn glyph size), and a real copy
+# carried both on the SAME page. _STEP_MARK and _WHOLE_MARK keep that ratio honest,
+# and the test suite pins it.
+_STEP_MARK_SIZE = 8.0
+_WHOLE_MARK_SIZE = 10.0
+_MAX_MARK_SIZE_RATIO = 1.3
 
 
 # ---------- Kalam font for handwritten remarks & marks ----------
@@ -79,13 +181,71 @@ def _sanitize_for_pdf(text: str) -> str:
         '∫': 'integral',  # Integral
         '→': '->',     # Arrow
         '←': '<-',     # Left arrow
+        '−': '-',      # U+2212 minus - NOT the ASCII hyphen, and base-14 has no glyph
+        '–': '-',      # en dash
+        '—': '-',      # em dash
+        '×': 'x',      # multiplication
+        '÷': '/',      # division
+        '∈': ' in ',   # set membership
+        '∉': ' not in ',
+        '⊂': ' subset of ',
+        '⊆': ' subset of ',
+        '∪': ' union ',
+        '∩': ' intersect ',
+        '∅': '{}',     # empty set
+        '∴': 'therefore',
+        '∵': 'because',
+        '≡': '=',
+        '°': ' deg',
+        '‘': "'", '’': "'", '“': '"', '”': '"',
+        '…': '...',
+        # Currency and capital Greek are outside WinAnsi, so the safety net below
+        # DROPS them silently - and a dropped currency sign changes what a number
+        # means. A commerce copy said "deduct ₹500" and the student read "deduct
+        # 500"; a maths one said "Δx" and the student read "x".
+        '₹': 'Rs.',   # rupee
+        '€': 'EUR ',  # euro
+        'Δ': 'delta ',
+        '∆': 'delta ',
+        'Σ': 'sum',
+        'Ω': 'ohm',
+        'Π': 'product',
+        'μ': 'mu',
+        'ρ': 'rho',
+        'φ': 'phi',
+        'χ': 'chi',
+        'τ': 'tau',
+        'η': 'eta',
     }
 
     result = text
     for char, replacement in replacements.items():
         result = result.replace(char, replacement)
 
-    return result
+    # Safety net. The cover is drawn in the base-14 fonts, whose encoding is WinAnsi:
+    # anything outside it renders as a hollow box, which is how a student came to read
+    # an interval as "(-2,·)". Fold what decomposes to ASCII, drop what does not - a
+    # missing character is bad, a box that looks like part of the maths is worse.
+    try:
+        result.encode("latin-1")
+    except UnicodeEncodeError:
+        import unicodedata
+        folded = unicodedata.normalize("NFKD", result)
+        result = "".join(
+            ch for ch in folded
+            if not unicodedata.combining(ch) and _encodable(ch)
+        )
+    # A spelled-out symbol brings its own spacing ("A ∪ B" -> "A  union  B"), and a
+    # double space is visible in a proportional font.
+    return re.sub(r"[ 	]{2,}", " ", result)
+
+
+def _encodable(ch: str) -> bool:
+    try:
+        ch.encode("latin-1")
+        return True
+    except UnicodeEncodeError:
+        return False
 
 
 def _register_cursive_font(page: fitz.Page) -> tuple[str, str | None]:
@@ -102,6 +262,57 @@ def _register_cursive_font(page: fitz.Page) -> tuple[str, str | None]:
         return (fontname, _CURSIVE_FONT_FILE)
     except Exception:
         return ("tiit", None)
+
+
+def _break_long_token(word: str, max_width: float, measure) -> list[str]:
+    """Break a single token that is wider than the column.
+
+    The per-step score line is written "0.5+0.5+0.5+0.5=2/3" — one token with no
+    spaces — so space-only wrapping could never break it and it ran off the edge of
+    the marks strip. Break after a '+' where possible, else by character.
+    """
+    if measure(word) <= max_width:
+        return [word]
+    out, cur = [], ""
+    for ch in word:
+        if cur and measure(cur + ch) > max_width:
+            cut = cur.rfind("+")
+            if cut > 0 and cut >= len(cur) - 6:      # break just after a '+'
+                out.append(cur[: cut + 1])
+                cur = cur[cut + 1:]
+            else:
+                out.append(cur)
+                cur = ""
+        cur += ch
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _wrap_to_width(text: str, max_width: float, measure) -> list[str]:
+    """Wrap `text` to `max_width`, breaking over-long tokens too.
+
+    THE single source of truth for wrapping. The code that DRAWS a strip entry and
+    the code that RESERVES its height must wrap identically: when only the drawing
+    side learned to break the score line, the reserved slot stayed one line tall and
+    the remark was written straight over the wrapped remainder ("0.5+0+0.5+0.5+0+ /
+    0.5=2/3" with "sales entry amount wrong" printed through it).
+    """
+    words = [piece
+             for w in text.split()
+             for piece in _break_long_token(w, max_width, measure)]
+    lines: list[str] = []
+    current = ""
+    for w in words:
+        trial = (current + " " + w).strip()
+        if measure(trial) <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = w
+    if current:
+        lines.append(current)
+    return lines
 
 
 def _draw_handwritten_remark(page: fitz.Page, x: float, y: float,
@@ -145,19 +356,8 @@ def _draw_handwritten_remark(page: fitz.Page, x: float, y: float,
         except Exception:
             return len(s) * size * 0.55
 
-    # Word-wrap manually so we can choose where each line breaks.
-    words = text.split()
-    lines: list[str] = []
-    current = ""
-    for w in words:
-        trial = (current + " " + w).strip()
-        if _measure(trial) <= max_width or not current:
-            current = trial
-        else:
-            lines.append(current)
-            current = w
-    if current:
-        lines.append(current)
+    # Word-wrap via the shared helper so height reservation cannot disagree.
+    lines = _wrap_to_width(text, max_width, _measure)
 
     line_gap = size * 1.35
     cy = y
@@ -201,15 +401,20 @@ def _wobble(seed: str, i: int, amp: float = 1.0) -> float:
 
 
 def _tapered_stroke(page: fitz.Page, pts: list[tuple[float, float]],
-                    w_start: float, w_end: float, seed: str = "") -> None:
-    """Draw a polyline from pts with width tapering from w_start to w_end.
+                    w_start: float, w_end: float, seed: str = "",
+                    width_at=None) -> None:
+    """Draw a polyline from pts, its width following `width_at` along the stroke.
 
-    Each segment is sub-divided so the width changes smoothly. Small positional
-    jitter is added so the stroke doesn't look mechanically straight.
+    `width_at(g)` is passed the arc-length fraction 0..1 and returns a width; the
+    default tapers linearly from w_start to w_end.
+
+    The jitter is applied to the SHARED vertices, not to each sub-segment. Giving
+    every sub-segment its own offset translated the pieces away from each other, so
+    a tick came out with white notches punched through it where consecutive pieces
+    no longer met. Round caps and joins close what is left at a width change.
     """
     if len(pts) < 2:
         return
-    # Build a cumulative length to map width along the whole stroke.
     seg_lens = []
     total = 0.0
     for i in range(len(pts) - 1):
@@ -221,46 +426,93 @@ def _tapered_stroke(page: fitz.Page, pts: list[tuple[float, float]],
     if total <= 0:
         return
 
-    SUBDIV = 6  # sub-segments per polyline segment
+    SUBDIV = 8  # sub-segments per polyline segment
+    if width_at is None:
+        def width_at(g):
+            return w_start + (w_end - w_start) * g
+
+    # One densified centreline, jittered once per vertex, so consecutive
+    # sub-segments start exactly where the previous one ended.
+    # The wobble is scaled by the local width. A flat 0.25pt of jitter is invisible
+    # on a 5pt stroke and a visible kink on the half-point tip of a tick, which is
+    # exactly where a real pen wobbles least.
+    w_ref = max(w_start, w_end, 0.1)
+    spine: list[tuple[float, float, float]] = []   # (x, y, arc fraction)
     travelled = 0.0
     for i in range(len(pts) - 1):
         ax, ay = pts[i]
         bx, by = pts[i + 1]
         seg = seg_lens[i]
-        for s in range(SUBDIV):
-            t0 = s / SUBDIV
-            t1 = (s + 1) / SUBDIV
-            x0 = ax + (bx - ax) * t0
-            y0 = ay + (by - ay) * t0
-            x1 = ax + (bx - ax) * t1
-            y1 = ay + (by - ay) * t1
-            # global progress for width
-            g = (travelled + seg * (t0 + t1) / 2) / total
-            w = w_start + (w_end - w_start) * g
-            # jitter perpendicular-ish so it stays close to the line
-            jx = _wobble(seed or "s", i * SUBDIV + s, amp=0.25)
-            jy = _wobble(seed or "s", i * SUBDIV + s + 99, amp=0.25)
-            page.draw_line(
-                fitz.Point(x0 + jx, y0 + jy),
-                fitz.Point(x1 + jx, y1 + jy),
-                color=RED, width=max(0.3, w),
-            )
+        last = SUBDIV if i == len(pts) - 2 else SUBDIV - 1
+        for s in range(last + 1):
+            t = s / SUBDIV
+            k = i * SUBDIV + s
+            g = (travelled + seg * t) / total
+            amp = 0.28 * min(1.0, width_at(g) / w_ref)
+            spine.append((
+                ax + (bx - ax) * t + _wobble(seed or "s", k, amp=amp),
+                ay + (by - ay) * t + _wobble(seed or "s", k + 99, amp=amp),
+                g,
+            ))
         travelled += seg
+
+    for (x0, y0, g0), (x1, y1, g1) in zip(spine, spine[1:]):
+        page.draw_line(
+            fitz.Point(x0, y0), fitz.Point(x1, y1),
+            color=RED, width=max(0.3, width_at((g0 + g1) / 2)),
+            lineCap=1, lineJoin=1,
+        )
 
 
 def _draw_tick(page: fitz.Page, x: float, y: float, size: float = 26,
                seed: str = "") -> None:
-    """Hand-drawn red tick: fat at the start, thin at the tail.
+    """Hand-drawn red tick: a short stroke down into the elbow, then a long flick
+    that stays broad and lifts off to a fine point.
 
-    Anchored so the elbow sits near (x + size*0.30, y). The tail extends
-    long and upward — like a teacher's flick.
+    The width used to fall away linearly across the WHOLE stroke, so the flick was
+    already thin where a pen is still pressed hard. A real tick holds its weight up
+    the flick and thins only as the hand lifts, which is what `_TICK_HOLD` and the
+    exponent below draw.
+
+    No two ticks are identical either. Length, height, elbow depth and pressure are
+    jittered from the seed, because a column of forty identical ticks reads as a
+    stamp rather than as marking. Every factor is <= 1.0 so the drawn tick still
+    fits the cluster width its caller reserved for it.
     """
+    seed = seed or f"t{x:.1f}{y:.1f}"
+    stretch = 0.93 + _wobble(seed, 11, amp=0.07)   # how far the flick runs
+    lift = 0.93 + _wobble(seed, 12, amp=0.07)      # how high it finishes
+    dip = 0.95 + _wobble(seed, 13, amp=0.10)       # how deep the elbow sits
+    heavy = 1.0 + _wobble(seed, 14, amp=0.16)      # pen pressure on this one
+
     p1 = (x, y - size * 0.25)
-    p2 = (x + size * 0.30, y + size * 0.20)
-    p3 = (x + size * 1.50, y - size * 1.40)
-    w_fat = max(1.6, size * 0.20)
-    w_thin = max(0.4, size * 0.05)
-    _tapered_stroke(page, [p1, p2, p3], w_fat, w_thin, seed=seed or f"t{x:.1f}{y:.1f}")
+    p2 = (x + size * 0.30, y + size * 0.20 * dip)
+    p3 = (x + size * 1.50 * stretch, y - size * 1.40 * lift)
+
+    w_max = max(1.6, size * 0.20) * heavy
+    w_head = w_max * 0.55          # the short stroke starts lighter
+    w_tip = max(0.35, size * 0.035)
+
+    d1 = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    d2 = math.hypot(p3[0] - p2[0], p3[1] - p2[1])
+    elbow = d1 / (d1 + d2) if (d1 + d2) > 0 else 0.5
+
+    _TICK_HOLD = 0.50              # fraction of the flick drawn at full weight
+
+    def width_at(g: float) -> float:
+        if g <= elbow:
+            # Pressure builds on the way down into the elbow.
+            return w_head + (w_max - w_head) * (g / elbow if elbow > 0 else 1.0)
+        t = (g - elbow) / (1.0 - elbow) if elbow < 1.0 else 1.0
+        # Full weight for the first half of the flick, then a quadratic lift-off.
+        # Quadratic on purpose: its slope is zero where the taper begins, so the
+        # width does not kink there — a piecewise-linear fall left a visible bead
+        # on the flick where the wide half butted against the thin one — and steep
+        # where it ends, so the stroke still finishes on a point.
+        u = max(0.0, (t - _TICK_HOLD) / (1.0 - _TICK_HOLD))
+        return max(w_tip, w_max * (1.0 - 0.06 * t) * (1.0 - u * u))
+
+    _tapered_stroke(page, [p1, p2, p3], w_max, w_tip, seed=seed, width_at=width_at)
 
 
 def _draw_cross(page: fitz.Page, x: float, y: float, size: float = 10,
@@ -388,6 +640,9 @@ def _number_width(text: str, size: float = 15) -> float:
     return w
 
 
+_UNDERLINE_DROP = 6.0    # how far under the text's centre an underline sits
+
+
 def _draw_strikethrough(page: fitz.Page, x: float, y: float, width: float) -> None:
     """Hand-drawn red strikethrough with slight wobble and width taper."""
     seed = f"st{x:.1f}{y:.1f}{width:.1f}"
@@ -401,31 +656,20 @@ def _draw_strikethrough(page: fitz.Page, x: float, y: float, width: float) -> No
     _tapered_stroke(page, pts, w_start=1.6, w_end=0.8, seed=seed)
 
 
-def _draw_hand_circle(page: fitz.Page, cx: float, cy: float,
-                      rx: float, ry: float, seed: str = "") -> None:
-    """Draw a wobbly hand-drawn red circle around (cx, cy)."""
-    seed = seed or f"c{cx:.1f}{cy:.1f}"
-    # Slightly tilt the ellipse for human feel
-    tilt = _wobble(seed, 0, amp=0.18)
-    cos_t, sin_t = math.cos(tilt), math.sin(tilt)
-    # Start a little past 0 and overshoot — like a real circle pen-stroke
-    start = _wobble(seed, 1, amp=0.4)
-    end = 2 * math.pi + 0.35 + _wobble(seed, 2, amp=0.3)
-    N = 56
+def _draw_underline(page: fitz.Page, x: float, y: float, width: float) -> None:
+    """Hand-drawn red underline. `y` is where the line sits, not the text's centre.
+
+    The caller works it out from the OCR line box, which is much taller than the
+    glyphs it holds — dropping a fixed distance from the centre still lands inside
+    the writing on a tall box.
+    """
+    seed = f"ul{x:.1f}{y:.1f}{width:.1f}"
+    steps = max(8, int(width / 6))
     pts = []
-    for i in range(N + 1):
-        a = start + (end - start) * (i / N)
-        # radius wobble
-        r_jx = 1.0 + _wobble(seed, 10 + i, amp=0.06)
-        r_jy = 1.0 + _wobble(seed, 200 + i, amp=0.06)
-        lx = rx * r_jx * math.cos(a)
-        ly = ry * r_jy * math.sin(a)
-        # rotate
-        x = cx + lx * cos_t - ly * sin_t
-        y = cy + lx * sin_t + ly * cos_t
-        pts.append((x, y))
-    # variable width: a touch fatter on the downstroke, thinner at the tail
-    _tapered_stroke(page, pts, w_start=1.4, w_end=0.7, seed=seed)
+    for i in range(steps + 1):
+        t = i / steps
+        pts.append((x + width * t, y + _wobble(seed, i, amp=0.5)))
+    _tapered_stroke(page, pts, w_start=1.3, w_end=0.7, seed=seed)
 
 
 def _draw_number_in_circle(page: fitz.Page, x: float, y: float, text: str,
@@ -532,6 +776,64 @@ _FORM_LABEL_SNIPPETS = (
 )
 
 
+# A ledger's Total / Balance c/d row carries no working of its own - the marks belong
+# on the lines where the student actually did something. Nothing in the codebase knew
+# about these rows, so the even-spread and push-down placement stages happily put a
+# tick on "Total", which is what a reviewer flagged: "no mark will be awarded for
+# 'Total' but for 'Interest on Drawings'".
+_TOTAL_ROW_RE = re.compile(
+    r"^\W*(?:(?:by|to)\s+)?(?:"
+    r"grand\s+total|sub[\s-]*total|net\s+total|total"
+    r"|bal(?:ance)?\s*(?:c\s*/?\s*d|b\s*/?\s*d|c\s*/?\s*f|b\s*/?\s*f)"
+    r"|carried\s+(?:down|forward)|brought\s+(?:down|forward)"
+    r"|c\s*/\s*d|b\s*/\s*d|c\s*/\s*f|b\s*/\s*f"
+    r"|कुल|योग"
+    r")\b",
+    re.IGNORECASE)
+# Words that make a criterion genuinely ABOUT the total, so a tick there is correct.
+_TOTAL_CRITERION_RE = re.compile(
+    r"\b(total|totalling|totaling|casting|cast|footing|balancing|grand\s+total)\b",
+    re.IGNORECASE)
+
+
+# line_ids the OCR pass flagged as struck through. Kept beside the line index rather
+# than threaded through every signature, because the index is a flat tuple and every
+# placement stage would otherwise need widening.
+_CANCELLED_LIDS: set[str] = set()
+
+
+def _is_cancelled_line(pl: dict) -> bool:
+    """Whether this line is working the student crossed out."""
+    return (pl or {}).get("lid", "") in _CANCELLED_LIDS
+
+
+def _is_total_row(text: str) -> bool:
+    """True for a Total / Grand Total / Balance c/d style row.
+
+    Only the row's LABEL is tested, so "Total Debtors A/c" (a real account name) and
+    prose that merely contains the word are not caught.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    label = re.split(r"[\d₹|]", t, 1)[0]      # stop at the first figure or column rule
+    if len(label.split()) > 4:                     # a sentence, not a row label
+        return False
+    label = label.strip()
+    hit = _TOTAL_ROW_RE.match(label)
+    if not hit:
+        return False
+    # The keyword must BE the label, not just start it: "Total Debtors A/c" is an
+    # account in its own right and its line does carry working.
+    return not re.search(r"[A-Za-zऀ-ॿ]", label[hit.end():])
+
+
+def _is_total_criterion(c) -> bool:
+    """Whether this criterion is about the total itself, so a tick there is right."""
+    text = " ".join(str(getattr(c, f, "") or "") for f in ("description", "evidence"))
+    return bool(_TOTAL_CRITERION_RE.search(text))
+
+
 def _is_header(text: str) -> bool:
     """A line is a 'header' if it's just a question/section label, not student working.
 
@@ -565,32 +867,9 @@ def _is_header(text: str) -> bool:
         return True
     if len(sl) <= 5 and sl.startswith("(") and sl.endswith(")"):
         return True
+    if _heading_num(s) is not None:    # "Answer-4", "Ans 2", "Solution 3" labels
+        return True
     return False
-
-
-def _estimate_remark_height(text: str, max_w: float, size: float) -> float:
-    """Rough vertical extent the cursive remark will occupy once word-wrapped.
-
-    We only need a conservative estimate to reserve a blank slot — the real
-    wrapping happens in _draw_handwritten_remark."""
-    chars_per_line = max(8, int(max_w / (size * 0.5)))
-    n_lines = max(1, math.ceil(len(text.strip()) / chars_per_line))
-    return n_lines * size * 1.3 + 6
-
-
-# Per-document, per-page record of vertical bands already consumed by a teacher
-# remark. Without this, every sub-question's note independently picks the SAME
-# nearest blank gap and they overprint into garble. Keyed by id(doc) so it is
-# reset per build (see _reset_remark_bands in build_evaluated_pdf).
-_REMARK_BANDS: dict[int, dict[int, list[tuple[float, float]]]] = {}
-
-
-def _reset_remark_bands(doc: fitz.Document) -> None:
-    _REMARK_BANDS[id(doc)] = {}
-
-
-def _remark_bands(doc: fitz.Document, page_num: int) -> list[tuple[float, float]]:
-    return _REMARK_BANDS.setdefault(id(doc), {}).setdefault(page_num, [])
 
 
 # ---------- Right-hand marks/remarks strip ----------
@@ -599,13 +878,14 @@ def _remark_bands(doc: fitz.Document, page_num: int) -> list[tuple[float, float]
 # per-question ticks, scores, and remarks are written there — never on top of
 # the student's writing, and never clipped at the page edge. `_CONTENT_W` records
 # the ORIGINAL (left) content width per page so OCR pixel→PDF mapping still maps
-# onto the writing area, not the widened page. `_STRIP_CURSOR` packs entries
-# top-to-bottom within each page's strip so they never overlap each other.
+# onto the writing area, not the widened page. `_STRIP_SLOTS` tracks occupied
+# vertical intervals so an out-of-order anchor can still use free space above a
+# later answer instead of being pushed beside the following answer.
 STRIP_FRACTION = 0.24        # strip width as a fraction of the original page width
 STRIP_MIN_WIDTH = 175.0      # but never narrower than this (points)
-_STRIP_TOP = 40.0            # first entry starts below the strip header
+_STRIP_TOP = 26.0            # first entry keeps clear of the page's top edge
 _CONTENT_W: dict[tuple[int, int], float] = {}
-_STRIP_CURSOR: dict[int, dict[int, float]] = {}
+_STRIP_SLOTS: dict[int, dict[int, list[tuple[float, float]]]] = {}
 
 
 def _content_width(page: fitz.Page) -> float:
@@ -615,20 +895,52 @@ def _content_width(page: fitz.Page) -> float:
 
 
 def _reset_strip_state(doc: fitz.Document) -> None:
-    _STRIP_CURSOR[id(doc)] = {}
+    _STRIP_SLOTS[id(doc)] = {}
 
 
 def _reserve_strip_slot(doc: fitz.Document, page_num: int, y_pref: float,
                         height: float, page_h: float) -> float:
-    """Reserve a vertical slot of `height` in the strip near y_pref, never above
-    the running cursor (so entries stack without overlap). Returns the top y."""
-    reg = _STRIP_CURSOR.setdefault(id(doc), {})
-    cursor = reg.get(page_num, _STRIP_TOP)
-    y = max(y_pref, cursor)
-    # If it would run off the bottom, pull it up as far as the cursor allows.
-    if y + height > page_h - 8:
-        y = max(cursor, page_h - 8 - height)
-    reg[page_num] = y + height + 6.0
+    """Reserve the free vertical slot nearest ``y_pref``.
+
+    Question records are not guaranteed to arrive in page-y order (for example,
+    a subpart may have an OCR anchor while its siblings do not).  A single
+    forward-only cursor therefore displaced an earlier answer hundreds of points
+    down the page.  Keeping occupied intervals lets a late-arriving earlier
+    answer use the genuinely free space above existing annotations.
+    """
+    top = _STRIP_TOP
+    bottom = max(top, page_h - 8.0)
+    height = max(0.0, float(height))
+    preferred = min(max(float(y_pref), top), max(top, bottom - height))
+    gap = 6.0
+
+    reg = _STRIP_SLOTS.setdefault(id(doc), {})
+    occupied = sorted(reg.setdefault(page_num, []))
+    free: list[tuple[float, float]] = []
+    free_start = top
+    for start, end in occupied:
+        free_end = start - gap
+        if free_end >= free_start:
+            free.append((free_start, free_end))
+        free_start = max(free_start, end + gap)
+    if bottom >= free_start:
+        free.append((free_start, bottom))
+
+    candidates: list[float] = []
+    for start, end in free:
+        latest = end - height
+        if latest >= start:
+            candidates.append(min(max(preferred, start), latest))
+
+    if candidates:
+        y = min(candidates, key=lambda candidate: (abs(candidate - preferred), candidate))
+    else:
+        # An overfull strip is caught by rendered-copy preflight.  Keep the
+        # annotation on-page so the failure is visible and diagnosable.
+        y = preferred
+
+    occupied.append((y, y + height))
+    reg[page_num] = sorted(occupied)
     return y
 
 
@@ -636,39 +948,45 @@ def _strip_wrap_lines(text: str, max_w: float, size: float,
                       fontname: str = "helv") -> int:
     """Count how many wrapped lines `text` needs at width max_w — for height
     reservation. Measured slightly wide so we over-reserve rather than overlap."""
-    words = text.split()
-    lines, cur = 1, ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if cur and fitz.get_text_length(trial, fontname=fontname, fontsize=size + 1) > max_w:
-            lines += 1
-            cur = w
-        else:
-            cur = trial
-    return lines
+    def measure(txt: str) -> float:
+        try:
+            return fitz.get_text_length(txt, fontname=fontname, fontsize=size + 1)
+        except Exception:
+            return len(txt) * (size + 1) * 0.55
+
+    return max(1, len(_wrap_to_width(text, max_w, measure)))
+
+
+def _fmt_mark(v: float) -> str:
+    """3 not 3.0, 2.5 stays 2.5 — how a teacher writes a mark."""
+    return str(int(v)) if float(v).is_integer() else f"{v:g}"
 
 
 def _draw_strip_entry(page: fitz.Page, qid: str, awarded: float,
                       max_score: float, remark: str, y_pref: float,
-                      steps: list[float] | None = None) -> None:
-    """Write one question's verdict in the right-hand strip: the score calculation
-    and the remark. Tick/cross is now drawn directly on the sheet."""
+                      steps: list[float] | None = None,
+                      verdict: str = "") -> None:
+    """Write one question's score and feedback in the right-hand strip.
+
+    Objective rows also receive a compact verdict glyph in this QID-labelled lane,
+    where it cannot be mistaken for a neighbouring answer's verdict.
+    """
     doc = page.parent
     rect = page.rect
     cw = _content_width(page)
-    x0 = cw + 12.0
+    verdict = str(verdict or "").strip().lower()
+    verdict_lane = 25.0 if verdict in {"correct", "wrong"} else 0.0
+    x0 = cw + 12.0 + verdict_lane
     x1 = rect.width - 8.0
     max_w = max(110.0, x1 - x0)
 
     full = max_score > 0 and awarded >= max_score - 1e-6
-    zero = awarded <= 1e-6
     remark = (remark or "").strip()
     # Sanitize remark to avoid PDF encoding issues with special characters
     remark = _sanitize_for_pdf(remark)
     show_reason = bool(remark) and not full
 
-    def _fmt(v: float) -> str:
-        return str(int(v)) if float(v).is_integer() else f"{v:g}"
+    _fmt = _fmt_mark
 
     # Show step-by-step calculation if steps are provided
     if steps and len(steps) > 1:
@@ -680,221 +998,184 @@ def _draw_strip_entry(page: fitz.Page, qid: str, awarded: float,
         score_txt = f"{_fmt(awarded)}/{_fmt(max_score)}" if max_score else _fmt(awarded)
         head = f"{qid}  {score_txt}".strip()
 
-    head_size = 12.0  # Increased from 11.0
+    # The whole strip entry is written in the handwriting font — a typed bold
+    # "1(a) 2/2" next to cursive remarks was the single biggest "a computer did
+    # this" tell on the page.
+    head_size = 15.0
     head_line_h = head_size * 1.4
-    reason_size = 14.5  # Increased from 11.5 for better visibility
+    reason_size = 14.5
 
-    # If we have steps, show calculation on its own line
+    # If we have steps, show calculation on its own line. The calculation itself can
+    # WRAP ("0.5+0.5+0.5+0.5+0.5+0.5=3/3" is wider than the strip), so reserve for the
+    # lines it will really take — counted with the same wrapper that draws it.
+    # A short reason rides on the head line. An MCQ block is five entries deep and
+    # "Q1.ii 0/2" + "Ans: A" on separate lines needs seven lines where the strip has
+    # room for five — the last two entries were reserved a slot off the bottom of the
+    # page and silently never appeared, so two of the five answers came back with no
+    # mark shown at all.
+    if show_reason and not (steps and len(steps) > 1):
+        merged = f"{head}  {remark}"
+        if _strip_wrap_lines(merged, max_w, head_size) == 1:
+            head, show_reason = merged, False
+    reason_lines = _strip_wrap_lines(remark, max_w, reason_size) if show_reason else 0
+    reason_h = (reason_lines * reason_size * 1.32 + 8) if show_reason else 0
     if steps and len(steps) > 1:
-        reason_lines = _strip_wrap_lines(remark, max_w, reason_size) if show_reason else 0
-        block_h = head_line_h * 2 + (reason_lines * reason_size * 1.32 + 8 if show_reason else 0) + 8
+        calc_lines = _strip_wrap_lines(score_txt, max_w, head_size)
+        block_h = head_line_h * (1 + calc_lines) + reason_h + 8
     else:
-        reason_lines = _strip_wrap_lines(remark, max_w, reason_size) if show_reason else 0
-        block_h = head_line_h + (reason_lines * reason_size * 1.32 + 8 if show_reason else 0) + 8
+        block_h = head_line_h + reason_h + 8
 
     y = _reserve_strip_slot(doc, page.number + 1, y_pref - head_size, block_h, rect.height)
 
-    # Show question ID and calculation
-    page.insert_text((x0, y + head_size), head, fontsize=head_size,
-                     color=RED, fontname="hebo")
+    # Objective verdicts live in a dedicated lane inside the widened margin. They
+    # remain attached to an explicit QID/score but can never cover the student's
+    # answer or be pushed onto a neighbouring MCQ row.
+    if verdict == "correct":
+        _draw_tick(page, cw + 9.0, y + head_size * 0.70,
+                   size=_ms(13), seed=f"{qid}|strip|tick")
+    elif verdict == "wrong":
+        _draw_cross(page, cw + 16.0, y + head_size * 0.55,
+                    size=_ms(10), seed=f"{qid}|strip|cross")
+
+    # Question ID + score, handwritten like the rest of the margin.
+    last_baseline = _draw_handwritten_remark(page, x0, y + head_size, head,
+                                             max_width=max_w, size=head_size)
 
     if steps and len(steps) > 1:
-        page.insert_text((x0, y + head_line_h * 2), score_txt, fontsize=head_size,
-                         color=RED, fontname="hebo")
-        reason_y = y + head_line_h * 2 + reason_size
-    else:
-        reason_y = y + head_line_h + reason_size
+        last_baseline = _draw_handwritten_remark(
+            page, x0, y + head_line_h * 2, score_txt,
+            max_width=max_w, size=head_size)
 
     if show_reason:
-        _draw_handwritten_remark(page, x0, reason_y,
+        # Follow the ACTUAL last baseline rather than assuming the line above was one
+        # line tall — that assumption is what printed the remark over the wrapped
+        # score calculation.
+        _draw_handwritten_remark(page, x0, last_baseline + reason_size * 1.35,
                                  remark, max_width=max_w, size=reason_size)
 
-
-# Per-document, per-page bands of actual INK on the page image (handwriting,
-# scribbles, crossed-out tables). The OCR only returns clean text lines, so it
-# misses messy regions; scanning the image keeps remarks off real ink that the
-# OCR never reported. Keyed by id(doc); populated in build_evaluated_pdf.
-_INK_BANDS: dict[int, dict[int, list[tuple[float, float]]]] = {}
-
-
-def _ink_intervals_from_png(png_bytes: bytes, pdf_h: float) -> list[tuple[float, float]]:
-    """Scan a page image and return vertical bands (in PDF coords) that contain
-    substantial ink — handwriting, scribbles, crossed-out tables.
-
-    Thin full-width strokes (the notebook's printed ruling) are filtered out so
-    that blank ruled lines still read as blank: a real line of writing occupies
-    a band ~15-40px tall, whereas a printed rule is only 1-3px. Returns [] on any
-    failure so the caller transparently falls back to OCR-only placement."""
-    try:
-        import io
-
-        import numpy as np
-        from PIL import Image
-
-        im = Image.open(io.BytesIO(png_bytes)).convert("L")
-        w, h = im.size
-        if w == 0 or h == 0:
-            return []
-        # Downscale tall scans for speed; ~1000 rows keeps line-level resolution.
-        target_h = min(h, 1000)
-        if target_h < h:
-            im = im.resize((max(1, w * target_h // h), target_h))
-            w, h = im.size
-        arr = np.asarray(im)                 # h×w, 0=black .. 255=white
-        dark_frac = (arr < 150).mean(axis=1)  # fraction of dark pixels per row
-        occupied = dark_frac > 0.012          # row has some ink
-
-        sy = pdf_h / h
-        # Group consecutive occupied rows into raw intervals (PDF coords).
-        raw: list[tuple[float, float]] = []
-        start = None
-        for i, occ in enumerate(occupied):
-            if occ and start is None:
-                start = i
-            elif not occ and start is not None:
-                raw.append((start * sy, i * sy))
-                start = None
-        if start is not None:
-            raw.append((start * sy, h * sy))
-
-        # Bridge tiny vertical gaps (writing has internal whitespace between
-        # words/letters) so one line of text stays a single band.
-        merged: list[tuple[float, float]] = []
-        for a, b in raw:
-            if merged and a - merged[-1][1] <= 6.0:
-                merged[-1] = (merged[-1][0], b)
-            else:
-                merged.append((a, b))
-
-        # Drop bands too thin to be writing — those are the printed ruling.
-        return [(a, b) for a, b in merged if (b - a) >= 8.0]
-    except Exception:
-        return []
+    # Where this entry ends, so a caller laying out an ordered list can ask for the
+    # space directly below it instead of "near y", which the slot search answers with
+    # the nearest free gap in EITHER direction - and that is what shuffled a column of
+    # MCQ verdicts out of question order.
+    return y + block_h
 
 
-def _ink_bands(doc: fitz.Document, page_num: int) -> list[tuple[float, float]]:
-    return _INK_BANDS.setdefault(id(doc), {}).get(page_num, [])
+# ---------- What counts as the student's own ink -------------------------------
+# ONE definition, shared by mark placement and the pre-flight check, because two
+# different notions of "ink" is exactly the bug they had between them: placement
+# reasoned about OCR boxes while pre-flight measured pixels, so neither saw what the
+# other did. Two dark things on a rendered page are not the student: the red marks we
+# just drew, and the notebook's printed ruling.
+#
+# The ruling is the expensive one. MEASURED at 150 dpi on a phone photo of a ruled
+# CBSE sheet: one printed rule crossing a mark's circle covers ~5.5% of it, and
+# pre-flight blocks at 6% — so a mark sitting on perfectly blank paper was reported as
+# "drawn over the student's writing, what is under it cannot be read". The same
+# blindness meant the clearance search could not find a free disc anywhere on a ruled
+# row, so it gave up and left every mark on top of the writing.
+#
+# Ruling is told from handwriting by horizontal EXTENT: a printed rule is one unbroken
+# run across the sheet, while handwriting breaks every few pixels. Thickness cannot do
+# it — a rule is ~2px and a pen stroke ~3-4px.
+_RULE_MIN_RUN = 0.35     # an unbroken dark run this wide is ruling, not writing
+_INK_DPI = 150
 
 
-def _find_blank_band(page_lines: list[dict], y_from: float, needed_h: float,
-                     page_h: float, search_limit: float = 9999.0,
-                     extra_occupied: list[tuple[float, float]] | None = None
-                     ) -> float | None:
-    """Find the top y of the nearest vertical gap >= needed_h at or below y_from
-    that is clear of every OCR line box AND every already-placed remark band.
+def _drop_printed_ruling(mask) -> None:
+    """Clear runs long enough to be the page's printed ruling. In place."""
+    import numpy as np
 
-    Returns None if no clear slot exists within search_limit of y_from (the
-    caller then shrinks the font or falls back). Conservative: it treats ANY
-    interval whose y-range overlaps the candidate band as a clash, so the note
-    never lands on student ink or on a sibling note."""
-    bottom = page_h - 10
-    if y_from + needed_h > bottom:
-        return None
-    occ = [(pl["y0"], pl["y1"]) for pl in page_lines]
-    if extra_occupied:
-        occ.extend(extra_occupied)
-    occ.sort(key=lambda t: t[0])
-    cursor = y_from
-    while cursor + needed_h <= bottom and cursor <= y_from + search_limit:
-        clash = None
-        for a, b in occ:
-            if b <= cursor:
-                continue              # interval entirely above the candidate band
-            if a >= cursor + needed_h:
-                break                 # sorted: nothing below clashes either
-            clash = (a, b)
-            break
-        if clash is None:
-            return cursor
-        cursor = clash[1] + 3          # jump just below the clashing line
-    return None
+    height, width = mask.shape
+    limit = max(24, int(width * _RULE_MIN_RUN))
+    # A run that long needs at least that much coverage, so most rows are skipped.
+    for y in np.flatnonzero(mask.mean(axis=1) >= _RULE_MIN_RUN):
+        row = mask[y]
+        edges = np.flatnonzero(np.diff(np.concatenate(
+            ([0], row.astype(np.int8), [0]))))
+        for start, end in zip(edges[0::2], edges[1::2]):
+            if end - start >= limit:
+                row[start:end] = False
 
 
-def _draw_remark_on_band(student_doc: fitz.Document, m, my_lines: list[dict],
-                         by_lid: dict[str, dict] | None = None) -> None:
-    """Scribble m.remark in cursive red in BLANK space near the last answer line.
+def student_ink_mask(page, dpi: int = _INK_DPI):
+    """(mask, scale) — True where the student's own pen is, in page pixels.
 
-    Only fires when (a) the model gave a remark and (b) the student lost marks.
-    Anchors to the last NON-HEADER line of the band, then searches downward for
-    a vertical gap clear of all student writing so the note never overlaps ink.
+    `scale` converts PDF points to those pixels. Returns (None, 1.0) when the page
+    cannot be rasterised, so every caller falls back to its previous behaviour
+    rather than reporting a page as blank.
     """
-    remark = (getattr(m, "remark", "") or "").strip()
-    if not remark:
-        return
-    # Sanitize remark to avoid PDF encoding issues
-    remark = _sanitize_for_pdf(remark)
     try:
-        score = float(getattr(m, "score", 0) or 0)
-        max_score = float(getattr(m, "max_score", 0) or 0)
-    except (TypeError, ValueError):
-        return
-    if max_score > 0 and score >= max_score:
-        return  # full marks — no margin note needed
+        import numpy as np
 
-    # Prefix the note with its sub-question id so it stays unambiguous even when
-    # the nearest blank slot sits a little below the answer it refers to.
-    qid = str(getattr(m, "qid", "") or "").strip()
-    remark = f"{qid}: {remark}" if qid else remark
-    real_lines = [pl for pl in my_lines if not _is_header(pl["text"])] or my_lines
-    if not real_lines:
-        return
-    last = real_lines[-1]
-    page_idx = last["page"] - 1
-    if page_idx < 0 or page_idx >= len(student_doc):
-        return
-    page = student_doc[page_idx]
-    rect = page.rect
-    seed = f"{getattr(m, 'qid', '')}|rk"
+        pm = page.get_pixmap(dpi=dpi)
+        arr = np.frombuffer(pm.samples, dtype=np.uint8).reshape(
+            pm.height, pm.width, pm.n)
+        r = arr[:, :, 0].astype(np.int16)
+        g = arr[:, :, 1].astype(np.int16)
+        b = arr[:, :, 2].astype(np.int16)
+        red = (r > 110) & (r > g + 55) & (r > b + 55)      # our own annotations
+        mask = (r < 150) & (g < 150) & (b < 150) & ~red
+        _drop_printed_ruling(mask)
+        return mask, dpi / 72.0
+    except Exception:
+        return None, 1.0
 
-    # Every OCR line box on this page — used to keep the note off student ink.
-    page_lines: list[dict] = []
-    if by_lid:
-        page_lines = [pl for pl in by_lid.values() if pl.get("page") == last["page"]]
 
-    # Start a little right of where the answer begins, with a wide column so the
-    # note rarely needs more than two wrapped lines.
-    rx = max(24.0, min(last["x0"] + 8 + _wobble(seed, 0, amp=3), rect.width - 230))
-    max_w = max(190.0, rect.width - rx - 24)
+def rect_ink_fraction(mask, scale: float, x0: float, y0: float,
+                      x1: float, y1: float) -> float:
+    """How much of this rectangle sits on the student's writing.
 
-    # Bands already taken by earlier notes on THIS page — so two sub-questions
-    # never stack their reasons in the same gap and overprint into garble.
-    taken = _remark_bands(student_doc, last["page"])
-    # Plus every band of real ink on the page image — catches scribbles and
-    # crossed-out tables the OCR never returned as text lines.
-    occupied_extra = taken + _ink_bands(student_doc, last["page"])
+    1.0 for a rectangle off the page, so a mark is never relocated off the sheet.
+    """
+    if mask is None:
+        return 0.0
+    height, width = mask.shape
+    a = int(max(0, x0 * scale)), int(max(0, y0 * scale))
+    b = int(min(width, x1 * scale + 1)), int(min(height, y1 * scale + 1))
+    if b[0] <= a[0] or b[1] <= a[1]:
+        return 1.0
+    return float(mask[a[1]:b[1], a[0]:b[0]].mean())
 
-    # Place the note in the nearest blank vertical slot below the answer that is
-    # clear of student ink AND earlier notes. Shrink the font once if the
-    # full-size note won't fit; only as a last resort drop it just below the line.
-    size = 15.5
-    needed_h = _estimate_remark_height(remark, max_w, size)
-    slot_top = _find_blank_band(page_lines, last["y1"] + 6, needed_h, rect.height,
-                                extra_occupied=occupied_extra)
-    if slot_top is None:
-        size = 12.5
-        needed_h = _estimate_remark_height(remark, max_w, size)
-        slot_top = _find_blank_band(page_lines, last["y1"] + 6, needed_h, rect.height,
-                                    extra_occupied=occupied_extra)
-    if slot_top is None:
-        slot_top = min(last["y1"] + 6, rect.height - needed_h - 8)
 
-    # Reserve this band so the next note on the page avoids it.
-    taken.append((slot_top, slot_top + needed_h))
+def disc_ink_fraction(mask, scale: float, cx: float, cy: float,
+                      radius: float) -> float:
+    """How much of the circle at (cx, cy) sits on the student's writing.
 
-    ry = slot_top + size + _wobble(seed, 1, amp=1.0)  # baseline of first line
-    # Cursive handwriting, no backing box — a larger size + the blank-band
-    # placement (off student ink) keep it readable without looking fake.
-    _draw_handwritten_remark(page, rx, ry, remark, max_width=max_w, size=size)
+    1.0 for a disc entirely off the page, so a mark is never relocated off the sheet.
+    """
+    if mask is None or radius <= 0:
+        return 0.0
+    import numpy as np
+
+    height, width = mask.shape
+    px, py, pr = cx * scale, cy * scale, radius * scale
+    x0, x1 = int(max(0, px - pr)), int(min(width, px + pr + 1))
+    y0, y1 = int(max(0, py - pr)), int(min(height, py + pr + 1))
+    if x1 <= x0 or y1 <= y0:
+        return 1.0
+    ys, xs = np.ogrid[y0:y1, x0:x1]
+    inside = (xs - px) ** 2 + (ys - py) ** 2 <= pr * pr
+    if not inside.any():
+        return 1.0
+    return float(mask[y0:y1, x0:x1][inside].mean())
 
 
 def _build_line_index(ocr_pages: list[PageOCR] | None) -> dict[str, tuple]:
     """Map line_id -> (page_num, bbox_px, image_w, image_h, line_text)."""
     idx: dict[str, tuple] = {}
+    # Rebuilt per document: a stale id from the previous sheet would silently
+    # suppress a tick on this one.
+    _CANCELLED_LIDS.clear()
     if not ocr_pages:
         return idx
     for p in ocr_pages:
         for line in p.lines:
-            idx[line.line_id] = (line.page, line.bbox, p.image_width, p.image_height, line.text)
+            # A struck-out line keeps its geometry (a cross may still be drawn on it)
+            # but is never a candidate for a TICK — see _is_cancelled_line.
+            idx[line.line_id] = (line.page, line.bbox, p.image_width, p.image_height,
+                                 line.text)
+            if getattr(line, "cancelled", False):
+                _CANCELLED_LIDS.add(line.line_id)
     return idx
 
 
@@ -948,18 +1229,77 @@ def _draw_text(page: fitz.Page, x: float, y: float, text: str, *, size: float = 
     return y
 
 
+# Sentence boundary: ./!/?/] followed by whitespace and something that starts a new
+# sentence ("]" so a bracketed [NOTICE ...] becomes its own bullet). Requiring a
+# non-digit, non-lowercase next char keeps decimals ("64.5"), abbreviations ("e.g. this")
+# and amounts ("Rs. 50") in ONE bullet instead of shredding them — a naive split('.')
+# once printed "sum to 64." and "5 but..." as two bullets.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\]])\s+(?=[^\sa-z\d])")
+
+
+def _split_remark_sentences(text: str) -> list[str]:
+    out: list[str] = []
+    for chunk in (text or "").split("\n"):
+        chunk = chunk.strip()
+        if chunk:
+            out.extend(s.strip() for s in _SENTENCE_SPLIT_RE.split(chunk) if s.strip())
+    return out
+
+
+# Third-person verb forms that follow "the student ..." in model remarks, mapped to the
+# second-person form that must follow "you ...". Applied only to this curated list so a
+# noun ending in -s is never mangled.
+_THIRD_TO_SECOND = {
+    "has": "have", "is": "are", "was": "were", "does": "do", "goes": "go",
+    "demonstrates": "demonstrate", "shows": "show", "needs": "need", "misses": "miss",
+    "makes": "make", "lacks": "lack", "uses": "use", "writes": "write", "gives": "give",
+    "provides": "provide", "fails": "fail", "scores": "score", "applies": "apply",
+    "understands": "understand", "follows": "follow", "presents": "present",
+    "explains": "explain", "calculates": "calculate", "treats": "treat", "records": "record",
+    "prepares": "prepare", "displays": "display", "exhibits": "exhibit", "attempts": "attempt",
+    "answers": "answer", "knows": "know", "seems": "seem", "appears": "appear", "tends": "tend",
+    "struggles": "struggle", "confuses": "confuse", "omits": "omit", "forgets": "forget",
+    "ignores": "ignore", "states": "state", "mentions": "mention", "identifies": "identify",
+    "computes": "compute", "handles": "handle", "performs": "perform", "commits": "commit",
+    "leaves": "leave", "skips": "skip", "mixes": "mix", "reaches": "reach", "takes": "take",
+    "includes": "include", "quotes": "quote", "cites": "cite", "requires": "require",
+}
+_STUDENT_REF_RE = re.compile(r"\b([Tt]he student)('s)?(?:\s+([A-Za-z]+))?")
+
+
+def _personalize(text: str) -> str:
+    """Rewrite 'the student ...' remarks in the second person, grammatically:
+    'The student has' -> 'You have', "the student's" -> 'your', 'The student
+    demonstrates' -> 'You demonstrate'. (A naive replace produced 'You has'.)"""
+
+    def repl(m: re.Match) -> str:
+        cap = m.group(1)[0] == "T"
+        tail = (" " + m.group(3)) if m.group(3) else ""
+        if m.group(2):                                   # possessive
+            return ("Your" if cap else "your") + tail
+        pron = "You" if cap else "you"
+        verb = m.group(3)
+        if verb:
+            fixed = _THIRD_TO_SECOND.get(verb.lower())
+            if fixed is not None:
+                verb = fixed.capitalize() if verb[0].isupper() else fixed
+            return f"{pron} {verb}"
+        return pron
+
+    return _STUDENT_REF_RE.sub(repl, text or "")
+
+
 def _draw_bulleted_remarks(page: fitz.Page, x: float, y: float, text: str, *,
                           size: float = 11, color=BLACK, fontname: str = "helv",
                           max_width: float = 515) -> float:
-    """Draw remarks as bullet points for the student. Splits by periods and formats nicely."""
+    """Draw remarks as bullet points for the student. Splits by sentences and formats nicely."""
     if not text or not text.strip():
         return y
 
-    # Replace "the student" with "you" to make it personal for the student
-    text = text.replace("The student", "You").replace("the student", "you")
+    # Address the student directly, grammatically.
+    text = _personalize(text)
 
-    # Split text by periods to create bullet points
-    sentences = [s.strip() for s in text.split('.') if s.strip()]
+    sentences = _split_remark_sentences(text)
 
     line_height = size * 1.35
     indent = 15
@@ -967,8 +1307,8 @@ def _draw_bulleted_remarks(page: fitz.Page, x: float, y: float, text: str, *,
     bullet_indent = x + indent
 
     for sentence in sentences:
-        # Add back period if it was removed by split
-        if not sentence.endswith(('?', '!')):
+        # Ensure each bullet reads as a sentence (bracketed notices keep their bracket).
+        if not sentence.endswith(('.', '?', '!', ']')):
             sentence = sentence + '.'
 
         # Word wrap each sentence
@@ -1003,50 +1343,255 @@ def _draw_bulleted_remarks(page: fitz.Page, x: float, y: float, text: str, *,
     return y
 
 
-def _add_diagram_anchors(lines: list[dict], gap_threshold: float = 70.0) -> list[dict]:
-    """Synthesize virtual 'diagram' anchor lines in big vertical gaps between OCR lines.
+# Mathpix diagram/table region anchors ("P3D1") — opaque blocks the OCR could not
+# transcribe line by line (hand-drawn ledgers, statements, figures).
+_DIAG_REGION_RE = re.compile(r"^P\d+D\d+$")
 
-    OCR doesn't catch hand-drawn diagrams, so for steps the model couldn't
-    anchor to a text line we still need somewhere to drop the tick. A wide
-    blank band between two consecutive text lines is almost certainly a
-    diagram — give it a synthetic line in the middle.
+
+_MARK_PAD = 8.0          # breathing room between a mark and the writing beside it
+_MIN_DROP_BAND = 13.0    # a gap below the row has to be this tall to hold a mark
+
+
+def _row_cells(by_lid: dict, page_no: int, y: float, own_lid: str = "") -> list[dict]:
+    """Every OTHER piece of writing sharing this row, left to right."""
+    return sorted((pl for lid, pl in by_lid.items()
+                   if pl["page"] == page_no and lid != own_lid
+                   and pl["y0"] - 2 <= y <= pl["y1"] + 2),
+                  key=lambda pl: pl["x0"])
+
+
+def _free_gaps(cells: list[dict], lo: float, hi: float) -> list[tuple[float, float]]:
+    """Spans between `lo` and `hi` with no writing in them, padded off the writing."""
+    gaps: list[tuple[float, float]] = []
+    cur = lo
+    for pl in cells:
+        left = pl["x0"] - _MARK_PAD
+        if left > cur:
+            gaps.append((cur, left))
+        cur = max(cur, pl["x1"] + _MARK_PAD)
+    if hi > cur:
+        gaps.append((cur, hi))
+    return gaps
+
+
+def _drop_below(by_lid: dict, page_no: int, y: float) -> float:
+    """How far to move a mark down to reach the blank band under this row.
+
+    0.0 when there is no band tall enough — the caller then keeps its own y.
     """
-    if not lines:
-        return lines
-    augmented = list(lines)
-    for i in range(len(lines) - 1):
-        a, b = lines[i], lines[i + 1]
-        if a["page"] != b["page"]:
-            continue
-        gap = b["y0"] - a["y1"]
-        if gap >= gap_threshold:
-            mid_y = (a["y1"] + b["y0"]) / 2
-            augmented.append({
-                "lid": f"_diag@P{a['page']}@{int(mid_y)}",
-                "x0": min(a["x0"], b["x0"]),
-                "y0": mid_y - 14,
-                "x1": max(a["x1"], b["x1"]),
-                "y1": mid_y + 14,
-                "text": "[diagram]",
-                "page": a["page"],
-            })
-    # Also add an anchor below the final line if there's a big blank tail
-    # (the last criterion of a diagram-heavy question often falls here).
-    augmented.sort(key=lambda r: (r["page"], r["y0"]))
-    return augmented
+    row = [pl for pl in by_lid.values()
+           if pl["page"] == page_no and pl["y0"] - 2 <= y <= pl["y1"] + 2]
+    if not row:
+        return 0.0
+    bottom = max(pl["y1"] for pl in row)
+    # "Below" means any line off this row that starts at or under its bottom edge.
+    # Testing y0 > bottom + 1 misses the row directly beneath, whose y0 sits level
+    # with this row's y1 — and then a mark drops straight onto it.
+    below = [pl["y0"] for pl in by_lid.values()
+             if pl["page"] == page_no
+             and not (pl["y0"] - 2 <= y <= pl["y1"] + 2)
+             and pl["y0"] >= bottom - 2]
+    next_top = min(below) if below else bottom + 34.0
+    if next_top - bottom < _MIN_DROP_BAND:
+        return 0.0
+    return (bottom + next_top) / 2 - y
 
 
-def _is_synthetic_anchor(pl: dict) -> bool:
-    """True for the virtual blank-band anchors added by _add_diagram_anchors —
-    they carry text '[diagram]' and a lid like '_diag@P2@1234'. A real OCR text
-    line is never synthetic."""
-    return (str(pl.get("lid", "")).startswith("_diag@")
-            or (pl.get("text") or "").strip().lower() == "[diagram]")
+# Per-document, per-page student-ink rasters, built on first use so a page with no
+# marks never pays for one. Keyed by id(doc) like the other build registries.
+_MARK_INK: dict[int, dict[int, tuple]] = {}
+
+_MARK_CLEAR_INK = 0.010  # leave measurement headroom: placement probes the full
+                         # drawn circle while pre-flight probes its 11pt numeral core
+_MARK_SLIDE_MAX = 130.0  # how far along its row a mark may travel from where the
+                         # caller wanted it. A mark means nothing beside the wrong
+                         # step, and an earlier repair that roamed 177pt into the
+                         # margin read worse than the overlap it was fixing.
+_MARK_LIFT_MAX = 30.0    # ...and how far up or down, when the row is full
+_MARK_LEAST_BAD_GAIN = 0.01  # when nothing is clear, how much cleaner a spot has to
+                             # be before the mark is moved to it at all
+
+# What a teacher does when the answer runs to the edge of the page: they write the
+# mark SMALLER and squeeze it in, rather than printing it over the words. Tried only
+# after a full-size spot has been looked for everywhere on the line, because a normal
+# mark a little further along still reads better than a tiny one.
+# MEASURED on the CBSE Chemistry sheet: of 14 marks with nowhere to go, 9 sit on
+# writing that a smaller circle clears outright — one went from 9% ink to 0%.
+_MARK_SHRINKS = (1.0, 0.8, 0.65, 0.55)   # 0.55 is still legible next to the writing
+
+# Fallback probe radius, for a caller that draws no circle at all (a bare tick).
+# Anything that DOES draw one passes its real radius. Pre-flight's fixed 11pt is
+# barely half the circle actually drawn (measured mean 19.1pt), and probing at 11
+# declared spots clear that the real mark then covered: 38 of 43 marks sat on the
+# writing whether or not the search ran, while the 11pt probe reported 14 of them.
+# Probe what you draw.
+_MARK_PROBE_R = 11.0
+
+
+# Steps this build could not place on the student's writing, collected per copy.
+# Builds are serialised by _RENDER_LOCK, so a plain dict is safe here for the same
+# reason _CONTENT_W and _MARK_INK are. Read back onto the report at the end of the
+# build: with no human reviewing held copies, an unplaced step has to become a
+# re-marking trigger rather than a silently missing tick.
+_UNANCHORED: dict[str, int] = {}
+
+
+def _note_unanchored(qid: str, count: int) -> None:
+    if count > 0:
+        _UNANCHORED[str(qid or "?")] = _UNANCHORED.get(str(qid or "?"), 0) + count
+
+
+def _page_ink(doc: "fitz.Document | None", page_no: int) -> tuple:
+    """The student-ink raster for this page, built once per copy.
+
+    `doc` is None in unit tests that exercise the OCR-cell reasoning on its own;
+    that returns no mask, and the caller falls back to it.
+    """
+    if doc is None:
+        return None, 1.0
+    reg = _MARK_INK.setdefault(id(doc), {})
+    if page_no not in reg:
+        try:
+            reg[page_no] = student_ink_mask(doc[page_no - 1])
+        except Exception:
+            reg[page_no] = (None, 1.0)
+    return reg[page_no]
+
+
+def _mark_ink(mask, scale: float, x: float, y: float,
+              probe_dx: float, probe_r: float, probe_dy: float = 0.0) -> float:
+    """How buried the mark would be if the cluster started at x.
+
+    probe_dy matters for a bare tick: it is drawn from its anchor UP and to the
+    right, so its ink sits well above the y the caller passes, and probing at that
+    y measured empty paper while the tick itself lay across the writing.
+    """
+    return disc_ink_fraction(mask, scale, x + probe_dx, y + probe_dy, probe_r)
+
+
+def _clear_x_for_mark(doc: "fitz.Document | None", by_lid: dict, page_no: int, y: float,
+                      x_from: float, cluster_w: float, right_cap: float,
+                      own_lid: str = "", probe_dx: float | None = None,
+                      probe_r: float = _MARK_PROBE_R, probe_dy: float = 0.0,
+                      lift_max: float = _MARK_LIFT_MAX) -> tuple[float, float, float]:
+    """Find a spot on this row where a mark covers none of the student's writing.
+
+    Marks were placed a fixed 12pt past the ANCHORED line's own right edge, with no
+    look at what else sits on that row. In a ledger the row is several separate OCR
+    cells — "To Intt on capital :" and "150 000" are different lines at the same y —
+    so the mark landed inside the amount column and printed over the student's
+    figures ("150 000" came out as "150(0.5)00"). On a sheet with a rough-work
+    column the same rule dropped a tick into the rough work.
+
+    Sliding right fixes that only while the row has room to the right. In a cash
+    book or balance sheet the amounts column runs to the edge of the page, so there
+    is none, and the old fallback returned the caller's overlapping x — printing the
+    mark straight through the figure. On a real CA Foundation Accounting copy that
+    put 6 of 27 marks on the student's own numbers, one of them turning 7,61,024
+    into "76(1)24". Prose papers hid the bug: they have a clear right margin, and
+    only 1 of 39 marks overlapped.
+
+    Returns `(x, dy, shrink)` — the start x, how far to move the mark DOWN, and what
+    to multiply its size by. Preference, in the order a teacher works: a clear spot at
+    full size along this line, then the blank band above or below it, then the same
+    search with a smaller mark, and only if the whole line is written over, the least
+    buried spot going. A mark is never put out on the desk around a photographed page.
+    """
+    # OCR boxes are only a guess at where the writing is: Mathpix returns clean text
+    # lines and misses how far real handwriting sprawls, so a "free gap" between two
+    # cells is routinely full of the student's pen. Pre-flight then measured the
+    # PIXELS and blocked the copy — placement and the gate were reading two different
+    # pages. MEASURED on a ruled CBSE sheet: 28 of 40 marks landed on writing, up to
+    # 90% buried. So the gaps below are treated as candidates, and the page raster
+    # decides. Only a spot verified clear is used, so this can never place worse than
+    # the caller asked for.
+    mask, scale = _page_ink(doc, page_no)
+    if probe_dx is None:
+        probe_dx = cluster_w / 2
+    if mask is not None:
+        step = 3.0
+        floor = 2.0
+        rightward = [x_from + i * step for i in range(int(_MARK_SLIDE_MAX / step) + 1)]
+        leftward = [x_from - (i + 1) * step for i in range(int(_MARK_SLIDE_MAX / step))]
+        # Ink alone is not enough: in a ledger the gap between "150" and "000" IS
+        # blank paper, and dropping the mark into it is the very defect this function
+        # exists for. So a candidate must clear the OCR cells AND the pixels.
+        # The cell rule guards ONE hazard: dropping the mark into the amounts column
+        # of the row it is marking, where blank paper between "150" and "000" is not
+        # free space. That is about the anchor row, so it is applied only there. It
+        # used to be applied at every vertical offset as well, using the anchor row's
+        # cells — and on a CA ledger, whose anchor row is written cell to cell, that
+        # blocked every candidate at every offset: the search reported "nowhere to go"
+        # with 23 clear spots one line up. MEASURED, marks left sitting on writing:
+        # anchor-row cells everywhere 1 (CA) / 10 (Chemistry); cells re-looked-up per
+        # row 0 / 12; cells on the anchor row only, ink alone above and below 0 / 8.
+        _cells_at: dict[float, list] = {}
+
+        def _in_a_cell(x: float, dy: float = 0.0) -> bool:
+            if dy not in _cells_at:
+                _cells_at[dy] = _row_cells(by_lid, page_no, y + dy, own_lid)
+            return any(x < c["x1"] + _MARK_PAD and x + cluster_w > c["x0"] - _MARK_PAD
+                       for c in _cells_at[dy])
+
+        row = [x for x in rightward + leftward if floor <= x <= right_cap]
+        start_ink = _mark_ink(mask, scale, x_from, y, probe_dx, probe_r, probe_dy)
+        best = (x_from, 0.0, 1.0, start_ink)
+        # Full size everywhere on the line first — a normal mark a little further
+        # along reads better than a small one exactly on the spot. Only when the whole
+        # line is written over does the mark get smaller, which is what a teacher does.
+        for shrink in _MARK_SHRINKS:
+            sdx, sr = probe_dx * shrink, probe_r * shrink
+            band = [0.0] + sorted([d for k in range(4, int(lift_max) + 1, 3)
+                                   for d in (k, -k)], key=abs)
+            for dy in band:
+                # Searched at full resolution throughout. Sampling the bands above and
+                # below every other step ran the whole build 1.7s faster on an 8-page
+                # copy and put two more marks back on the student's writing; rendering
+                # is ~2% of what grading one copy costs, so the marks win.
+                for x in row:
+                    if dy == 0.0 and _in_a_cell(x, dy):
+                        continue
+                    got = _mark_ink(mask, scale, x, y + dy, sdx, sr, probe_dy * shrink)
+                    if got <= _MARK_CLEAR_INK:
+                        return x, dy, shrink
+                    if dy == 0.0 and got < best[3]:
+                        best = (x, 0.0, shrink, got)
+        # Nowhere on this line is clear at any size. Take the LEAST buried spot rather
+        # than the caller's, which on a phone photo is often past the last word and
+        # out on the desk, where a red mark simply cannot be seen. Only move for a
+        # real gain, so a mark never drifts across the page to win a percentage point.
+        if start_ink - best[3] >= _MARK_LEAST_BAD_GAIN:
+            return best[0], best[1], best[2]
+        # else fall through to the OCR-cell reasoning below, which is what ran
+        # before the raster existed.
+
+    cells = _row_cells(by_lid, page_no, y, own_lid)
+    if not cells:
+        return x_from, 0.0, 1.0
+
+    hi = right_cap + cluster_w          # the furthest right the cluster may END
+    fits = [(a, b) for a, b in _free_gaps(cells, 2.0, hi) if b - a >= cluster_w]
+
+    # 1. the first gap that can hold the mark at or after the caller's x.
+    # Only ever rightward: the caller picked x_from to clear the anchor's OWN
+    # writing, and that line is not in `cells`, so any gap to the left of x_from
+    # looks empty here while actually sitting on top of the student's words.
+    for a, b in fits:
+        if b - max(a, x_from) >= cluster_w:
+            return max(a, x_from), 0.0, 1.0
+    # 2. the row is full to the right edge — go under it rather than through it
+    dy = _drop_below(by_lid, page_no, y)
+    if dy:
+        return min(x_from, right_cap), dy, 1.0
+    return x_from, 0.0, 1.0
 
 
 def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
                             by_lid: dict[str, dict],
-                            placed_by_page: dict[int, list[float]] | None = None) -> None:
+                            placed_by_page: dict[int, list[float]] | None = None,
+                            region_start: tuple[int, float] | None = None,
+                            region_end: tuple[int, float] | None = None,
+                            objective_queue: list | None = None) -> None:
     """Write this question's verdict: step marks on the sheet for numerical problems,
     and calculation/remark in the right-hand marks strip.
 
@@ -1059,20 +1604,40 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     mx = float(getattr(m, "max_score", 0) or 0)
     remark = (getattr(m, "remark", "") or "").strip()
     qid = str(getattr(m, "qid", "") or "").strip()
+    is_obj = (
+        bool(getattr(m, "objective", False))
+        or bool(str(getattr(m, "correct_option", "") or "").strip())
+        or bool(str(getattr(m, "chosen_option", "") or "").strip())
+    )
+    safe_layout = _SAFE_LAYOUT.get()
 
     # Collect criteria for step-by-step marking
     criteria = list(getattr(m, "criteria", []) or [])
-    steps = [float(getattr(c, "awarded", 0) or 0) for c in criteria] if criteria else []
+    # Filled in by the step loop with the marks it ACTUALLY put on the page, which is
+    # what the strip is then allowed to print. See the note beside it for why the two
+    # cannot be computed separately.
+    drawn_steps: list[float] = []
+    # Set wherever a tick or cross actually lands on the student's answer. The strip
+    # draws its own tick only when this stays False — a teacher ticks an answer once,
+    # and a released copy carried eight ticks down the page against eight more in the
+    # margin, one pair per question.
+    marked_on_sheet = False
 
     # A band runs up to the NEXT question's anchor, so the next question's first
     # line can bleed in (e.g. "Q6) Evaluate ... = 8..."). Keep THIS question's
     # own first line, but truncate at the next question's label so neither the
     # numerical test nor step placement is contaminated by a neighbour.
+    # A line this question ANCHORED to is its own, even when it reads like a
+    # question label: long CA answers carry "(a)", "(ii)", "Note 3" headings all
+    # the way down, and truncating there threw away the rest of the answer.
+    anchored_lids = {(getattr(c, "step_line_id", "") or "").strip() for c in criteria}
+    anchored_lids.discard("")
     own_lines: list[dict] = []
     for i, pl in enumerate(my_lines):
         t = (pl.get("text") or "").strip().lower()
-        if i > 0 and (_QHEADER_RE.match(t) or _QLABEL_LEAD_RE.match(t)
-                      or _QLABEL_LEAD_HI_RE.match(t)):
+        if (i > 0 and pl.get("lid") not in anchored_lids
+                and (_QHEADER_RE.match(t) or _QLABEL_LEAD_RE.match(t)
+                     or _QLABEL_LEAD_HI_RE.match(t))):
             break
         own_lines.append(pl)
     my_lines = own_lines
@@ -1100,14 +1665,19 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     anchor_lines = real or my_lines
 
     # "Unattempted" = scored 0 with no student writing in the band, or the verdict says so.
-    # Draw NOTHING on the page for these — the margin strip + remark already convey it; a
-    # cross floating on a blank space just looks like litter.
+    # Objective items carry an authoritative `attempted` flag from the visual reader.
+    # Do not infer that an attempted-but-wrong MCQ was blank merely because OCR failed to
+    # produce an anchor line.  That exact combination made Business Studies Q5 disappear
+    # from the marks strip even though the report correctly scored it 0/1.
     _remark_l = (remark or "").lower()
-    unattempted = aw <= 1e-6 and (
-        not real
-        or any(k in _remark_l for k in
-               ("unattempt", "not attempt", "not graded", "no answer", "left blank", "blank answer"))
-    )
+    if is_obj:
+        unattempted = aw <= 1e-6 and not bool(getattr(m, "attempted", True))
+    else:
+        unattempted = aw <= 1e-6 and (
+            not real
+            or any(k in _remark_l for k in
+                   ("unattempt", "not attempt", "not graded", "no answer", "left blank", "blank answer"))
+        )
 
     mark_style = str(getattr(m, "mark_style", "auto") or "auto").strip().lower()
     if mark_style == "per_step":
@@ -1121,11 +1691,13 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     MIN_MARKS_FOR_STEP = 3
     # Need somewhere to place the per-step marks; with no anchor lines fall back
     # to the single-mark branch (which handles the empty band via y_fraction).
-    use_step_marks = base_step and bool(anchor_lines) and mx >= MIN_MARKS_FOR_STEP
+    use_step_marks = (
+        not safe_layout and not is_obj and base_step and bool(anchor_lines)
+        and mx >= MIN_MARKS_FOR_STEP
+    )
 
     if not anchor_lines:
         page_num = max(1, min(int(getattr(m, "page", 1) or 1), len(student_doc)))
-        y_last = float(getattr(m, "y_fraction", 0.1) or 0.1) * student_doc[page_num - 1].rect.height
         x_end = 200.0
         page = student_doc[page_num - 1]
     else:
@@ -1136,56 +1708,105 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     cw = _content_width(page)
     seed = f"{qid}|mark"
 
+    def _owned_y_bounds(page_number: int, page_height: float) -> tuple[float, float]:
+        """Vertical extent of this question's invisible answer box on one page."""
+        low, high = 24.0, page_height - 20.0
+        if region_start and page_number == region_start[0]:
+            low = max(low, region_start[1] - 4.0)
+        if region_end and page_number == region_end[0]:
+            high = min(high, region_end[1] - 4.0)
+        return low, max(low, high)
+
     # For step-marked problems (numerical work OR enumerated points / labelled
     # diagrams): tick EACH step/point on the sheet where the student earned it —
     # with the marks for that step circled right after — exactly like a teacher
     # going down a solution. A question's band can span several pages, so every
     # step is resolved and drawn page-by-page.
     if use_step_marks:
-        # Candidate lines for step ticks: the band's real (non-header) lines,
-        # ordered top-to-bottom across pages. Fall back to all band lines if the
-        # band is somehow header-only.
         real_band = sorted(
             (pl for pl in my_lines if not _is_header(pl.get("text") or "")),
             key=lambda r: (r["page"], r["y0"], r["x0"]),
         )
-        candidates = real_band or sorted(
+        # A "Total" / "Balance c/d" row is not working — it is the sum of the rows
+        # above it. Keep those out of the pool the spread and push-down stages draw
+        # from, so a tick lands on "Interest on Drawings" rather than on "Total".
+        # real_band is kept as the fallback: a band that is ONLY totals still gets
+        # marked instead of silently losing its ticks.
+        working_band = [pl for pl in real_band
+                        if not _is_total_row(pl.get("text") or "")
+                        and not _is_cancelled_line(pl)]
+        candidates = working_band or real_band or sorted(
             my_lines, key=lambda r: (r["page"], r["y0"], r["x0"]))
 
-        # Stage 1: honour an explicit step_line_id when it points at a real line
-        # inside this band — on ANY page of the band, not just the first.
+        # WHERE EACH STEP IS MARKED.
+        #
+        # This used to be three stages: honour the model's step_line_id; spread
+        # whatever was left evenly down the band; then push any two steps that had
+        # collided onto different lines. The middle stage was the problem. MEASURED
+        # over 278 anchors on five archived copies, 23 named a line_id that is not in
+        # this copy's OCR at all and 33 were reused inside one question — so a fifth
+        # of all step marks reached the even spread, and were then positioned by
+        # `(k + 0.5) * lines / n`. A tick placed by arithmetic still reads to the
+        # student as "this line is right".
+        #
+        # `anchors.resolve_steps` replaces it. A step almost always NAMES what it is
+        # about ("Sale proceeds 8000 x 14 = 1,12,000") and the student's line carries
+        # it ("=112000"), so the line can be found from the step's own words. What it
+        # cannot find, it leaves unplaced — and an unplaced step is drawn NOWHERE and
+        # reported on the report for re-marking. See anchors.py.
         band_lids = {pl["lid"] for pl in my_lines}
-        assigned: dict[int, dict] = {}
-        unassigned: list[int] = []
-        for ci, c in enumerate(criteria):
-            lid = (getattr(c, "step_line_id", "") or "").strip()
+
+        def _model_anchor_ok(lid: str, criterion) -> bool:
             pl = by_lid.get(lid)
-            if pl is not None and lid in band_lids and not _is_header(pl.get("text") or ""):
-                assigned[ci] = pl
-            else:
-                unassigned.append(ci)
+            if pl is None or lid not in band_lids:
+                return False
+            text = pl.get("text") or ""
+            if _is_header(text) or _is_cancelled_line(pl):
+                return False
+            # An anchor on the Total row is honoured only when the criterion is
+            # genuinely about the total ("correct casting", "totals agree");
+            # otherwise the step belongs on a working line and is re-homed.
+            return not (_is_total_row(text) and not _is_total_criterion(criterion))
 
-        # Stage 2: spread the unanchored steps evenly down the band so each step
-        # lands on its own line instead of all piling onto the last one.
-        if unassigned and candidates:
-            n = len(unassigned)
-            for k, ci in enumerate(unassigned):
-                idx = min(int((k + 0.5) * len(candidates) / n), len(candidates) - 1)
-                assigned[ci] = candidates[idx]
+        resolutions = resolve_steps(criteria, candidates,
+                                    model_anchor_ok=_model_anchor_ok)
 
-        # Stage 3: if two steps resolved to the same line, push the later one to
-        # the next free real line so ticks never stack on top of each other.
-        used_lids: set[str] = set()
-        for ci in sorted(assigned, key=lambda c: (assigned[c]["page"], assigned[c]["y0"])):
-            pl = assigned[ci]
-            if pl["lid"] in used_lids:
-                later = [p for p in candidates
-                         if (p["page"], p["y0"]) >= (pl["page"], pl["y0"])
-                         and p["lid"] not in used_lids]
-                if later:
-                    pl = later[0]
-                    assigned[ci] = pl
-            used_lids.add(pl["lid"])
+        unplaced = [ci for ci, res in enumerate(resolutions) if not res.placed]
+        if unplaced:
+            _note_unanchored(qid, len(unplaced))
+
+        assigned: dict[int, dict] = {}
+        # Steps whose position is backed by evidence — the model named the line, or
+        # the step's own wording found it. Only these are safe to mark when they
+        # scored nothing: a zero drawn on a guessed line drifts away from the text it
+        # is about, which is why zeros used to be dropped altogether.
+        anchored_ci: set[int] = set()
+        band_by_lid = {pl["lid"]: pl for pl in my_lines}
+        for ci, res in enumerate(resolutions):
+            if not res.placed:
+                continue
+            pl = band_by_lid.get(res.line_id)
+            if pl is None:
+                continue
+            assigned[ci] = pl
+            anchored_ci.add(ci)
+        # Stage 3b: OCR returns a ledger / table / statement as ONE opaque region
+        # ("P3D1"). Several steps resolved to it would merge into a single tick at its
+        # middle, leaving a full-page investment account with one lonely "4". Fan
+        # them down the region instead — one tick per row of working, beside the
+        # amounts column, the way an examiner ticks down a ledger.
+        by_region: dict[str, list[int]] = {}
+        for ci, pl in assigned.items():
+            if _DIAG_REGION_RE.match(str(pl.get("lid", ""))):
+                by_region.setdefault(pl["lid"], []).append(ci)
+        for rlid, cis in by_region.items():
+            if len(cis) < 2:
+                continue
+            region = assigned[cis[0]]
+            step_h = (region["y1"] - region["y0"]) / (len(cis) + 1)
+            for k, ci in enumerate(sorted(cis)):
+                yc = region["y0"] + step_h * (k + 1)
+                assigned[ci] = {**region, "lid": f"{rlid}#{k}", "y0": yc - 8, "y1": yc + 8}
 
         # Group the assigned criteria BY their resolved line. Several steps that
         # land on the same line (e.g. a 5-mark answer written on one line, or two
@@ -1196,10 +1817,11 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             pl = assigned[ci]
             g = groups.get(pl["lid"])
             if g is None:
-                g = {"pl": pl, "awarded": 0.0, "max": 0.0}
+                g = {"pl": pl, "awarded": 0.0, "max": 0.0, "anchored": False}
                 groups[pl["lid"]] = g
             g["awarded"] += float(getattr(criteria[ci], "awarded", 0) or 0)
             g["max"] += float(getattr(criteria[ci], "max", 0) or 0)
+            g["anchored"] = g["anchored"] or ci in anchored_ci
 
         # Stage 4: draw one mark per line, on its OWN page, nudging down on the
         # rare occasion two lines' marks would still overlap vertically. Share the
@@ -1208,15 +1830,32 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
         ordered_groups = sorted(
             groups.values(), key=lambda g: (g["pl"]["page"], g["pl"]["y0"]))
         drew_positive = False
+        # What the strip is allowed to advertise. A reviewer on the Business Laws copy
+        # wrote "step marking is not proper" against Q1.b.i, which printed "1.5+1.5=3/4"
+        # beside a page carrying two marks and one unmarked (wrong) provision paragraph.
+        # `steps` was built from EVERY criterion up at the top of this function while
+        # this loop separately skips zero steps it could not anchor, so the two could
+        # disagree — the student counts the marks on the page and cannot reach the sum
+        # in the margin. Collect what actually lands, and let the strip print that.
+        # Pages this question actually put a mark on. Its band can run past the end
+        # of the answer onto the NEXT question's page, and the total used to follow
+        # the band, landing beside a different question's heading with nothing to say
+        # whose score it was — page 11 of a real copy read "3) b) Ans  5.5/6" when
+        # Q3.b was out of 4.
+        marked_pages: set[int] = set()
         for gi, g in enumerate(ordered_groups):
             pl = g["pl"]
             awarded = g["awarded"]
             max_step = g["max"]
-            # Only tick steps that EARNED marks. A 0-step's cross has no reliable line to
-            # sit on and tends to drift far from the relevant text (the Q17 problem) — the
-            # margin breakdown ("0.5+0+0") already records the zeros, so we don't scatter
-            # floating crosses. A wholly-wrong question gets ONE cross after the loop.
-            if awarded <= 1e-6:
+            # A step that scored nothing is still marked — but ONLY where the model
+            # named its line. The margin prints the whole chain ("1+0+1+1=3/4"), so a
+            # zero drawn nowhere leaves the student counting three ticks against four
+            # terms, unable to find the step that failed. Zeros on a GUESSED line are
+            # still dropped: those drift away from the text they are about (the Q17
+            # problem), and a mark in the wrong place is worse than none.
+            # A wholly-wrong question gets ONE cross after the loop instead.
+            zero_step = awarded <= 1e-6
+            if zero_step and not (g.get("anchored") and max_step > 0):
                 continue
 
             pg = student_doc[pl["page"] - 1]
@@ -1227,8 +1866,7 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # preferring the step's own line. Search downward first; if the page
             # tail is full, search back upward — never clamp several marks onto
             # the same y (overprint) or off the page (draws nothing).
-            ceiling = pg.rect.height - 20
-            floor_y = 24.0
+            floor_y, ceiling = _owned_y_bounds(pl["page"], pg.rect.height)
             placed = drawn_by_page.setdefault(pl["page"], [])
             y_mark = max(floor_y, min((pl["y0"] + pl["y1"]) / 2, ceiling))
 
@@ -1254,8 +1892,8 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             mark_text = (str(int(awarded)) if float(awarded).is_integer()
                          else f"{awarded:g}")
             is_dec = "." in mark_text
-            tick_size = 20
-            circle_size = 8
+            tick_size = _tick_size_for_line(20, pl["y1"] - pl["y0"])
+            circle_size = _ms(_STEP_MARK_SIZE)
             circle_r = circle_size * (1.9 if is_dec else 1.8) + 1.5
             cluster_w = tick_size * 1.5 + 6 + circle_r * 2
 
@@ -1263,28 +1901,129 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # cluster cross the right edge onto the marks strip: the right cap
             # wins over the left floor when the line itself starts far right.
             right_cap = cwp - 6 - cluster_w
-            tick_x = min(pl["x1"] + 12 + _wobble(sstep, 0, amp=5), right_cap)
+            writing_end = _row_writing_end(by_lid, pl["page"], pl["y0"], pl["y1"],
+                                           pl["x0"], pl["x1"], cwp)
+            tick_x = min(writing_end + 12 + _wobble(sstep, 0, amp=5), right_cap)
             floor = pl["x0"] + 2
             tick_x = max(floor, tick_x) if floor <= right_cap else right_cap
             tick_x = max(2.0, tick_x)
+            # ...and move clear of anything else written on this row, dropping into
+            # the band below when the row is written edge to edge (a ledger line).
+            # Where the NUMERAL will sit inside the cluster, which is what the
+            # clearance probe has to test — the tick ahead of it is a thin glyph and
+            # is not what buries a word.
+            fully_earned = max_step > 0 and awarded >= max_step - 1e-6
+            # A zero step needs the same room as a ticked one: its CROSS goes where
+            # the tick would, to the left of the circled mark.
+            mark_dx = (tick_size * 1.5 + circle_r + 6
+                       if (fully_earned or zero_step) else circle_r)
+            tick_x, tick_dy, shrink = _clear_x_for_mark(
+                student_doc, by_lid, pl["page"], y_mark, tick_x, cluster_w, right_cap,
+                own_lid=pl["lid"], probe_dx=mark_dx, probe_r=circle_r)
+            y_mark = max(floor_y, min(y_mark + tick_dy, ceiling))
+            # A tight spot gets a smaller mark, not a mark over the words.
+            tick_size *= shrink
+            circle_size *= shrink
+            mark_dx *= shrink
 
-            _draw_tick(pg, tick_x, y_mark, size=tick_size, seed=sstep + "t")
-            mark_x = tick_x + tick_size * 1.5 + circle_r + 6
+            # A TICK MEANS CORRECT. Only draw one when the line earned everything it
+            # was worth; a partially credited step gets its circled mark alone. The
+            # gate used to be "awarded > 0", so a step scored 1 of 4 carried a full
+            # teacher's tick — a reviewer flagged exactly that: "the wrong answer has
+            # been marked with a tick, and marks awarded, though a remark is given".
+            if fully_earned:
+                _draw_tick(pg, tick_x, y_mark, size=tick_size, seed=sstep + "t")
+                marked_on_sheet = True
+            elif zero_step:
+                # A point that earned NOTHING is wrong, and a teacher crosses it. It
+                # used to get its circled "0" and nothing else, so on the page it read
+                # exactly like a point that had simply been marked lightly. The
+                # reviewer said so twice on one copy — "cross is not there for wrong
+                # point", and "the student's wrong point should be crossed/marked
+                # clearly... the evaluator should not leave all five attempted points
+                # appearing equally accepted".
+                _draw_cross(pg, tick_x, y_mark, size=tick_size * 0.85, seed=sstep + "x")
+                marked_on_sheet = True
+            mark_x = tick_x + mark_dx
             _draw_number_in_circle(pg, mark_x, y_mark, mark_text,
                                    size=circle_size, seed=sstep)
-            drew_positive = True
+            marked_pages.add(pl["page"])
+            drawn_steps.append(awarded)
+            if not zero_step:
+                drew_positive = True
 
         # Whole question earned nothing but WAS attempted → ONE clean cross on its
         # first answer line (a teacher crosses an attempted-but-wrong answer once).
         # The per-step loop above already skips zero steps, so this is the only zero
         # cross — never a column. Skip only when unattempted (no writing to cross —
         # the margin strip + remark convey that).
-        if not drew_positive and anchor_lines and not unattempted:
+        #
+        # `drew_positive` alone used to stand for "every step scored zero", because
+        # every criterion was placed somewhere no matter what. Steps can now go
+        # unplaced, so an 8/10 answer whose ticks all failed to resolve would have
+        # been crossed out. The score itself is the thing being asserted here, so
+        # test it directly.
+        if not drew_positive and aw <= 1e-6 and anchor_lines and not unattempted:
             first = anchor_lines[0]
             fpg = student_doc[first["page"] - 1]
             fx = max(2.0, min(first["x1"] + 12, _content_width(fpg) - 40))
             fy = (first["y0"] + first["y1"]) / 2
-            _draw_cross(fpg, fx, fy, size=24, seed=seed + "x0")
+            _draw_cross(fpg, fx, fy, size=_ms(24), seed=seed + "x0")
+
+        # The question's TOTAL, written at the HEAD of the answer — where the human
+        # examiner puts it. On the marked copy for this very paper the evaluator wrote
+        # "10/10" beside "Answer - 2", "10/10" beside "Answer - 3", "4/5" beside
+        # "Answer - 4(a)": always at the top, never at the foot.
+        #
+        # Writing it where the answer ENDED put it next to the following answer's
+        # heading, because that is what sits there: Q2's total landed on page 3 above
+        # "Answer - 3", Q5(b)'s on page 7 above "Answer - 1". It also split a question
+        # across pages — Q4(b)'s total was written on page 6 while its strip entry
+        # stayed on page 5, so page 6 showed a bare "Q4b 4.5/5" against an empty strip
+        # — and it left page 1 with no mark at all, since every criterion the model
+        # anchored for Q2 pointed at pages 2 and 3. At the head the total sits beside
+        # its own strip entry, on the page the answer starts.
+        # Written as "3/3", never circled, so it cannot be mistaken for a step mark.
+        if anchor_lines and not unattempted:
+            last = sorted(anchor_lines, key=lambda p: (p["page"], p["y0"]))[0]
+            tpg = student_doc[last["page"] - 1]
+            tcw = _content_width(tpg)
+            # Label it. A bare "5.5/6" beside a heading reads as that heading's score;
+            # "Q3.a 5.5/6" cannot be misread whatever else shares the line.
+            total_txt = f"{qid} {_fmt_mark(aw)}/{_fmt_mark(mx)}".strip()
+            size = _ms(15)
+            width = fitz.get_text_length(total_txt, fontname="hebo", fontsize=size) + 6
+            ty = (last["y0"] + last["y1"]) / 2
+            placed_t = placed_by_page.setdefault(last["page"], [])
+            # Bounded to this question's own last line. Keeping the total on the right
+            # PAGE is not enough: the walk below only stopped at the foot of the page,
+            # so Q5(b)'s total stepped 26pt at a time off the end of its answer and
+            # came to rest inside the MCQ block underneath. It then sat in `placed`,
+            # where it collided with the first MCQ and pushed every tick and cross in
+            # that block one answer down — the option the student got RIGHT ended up
+            # carrying a cross. An overlap on its own line is the lesser evil.
+            line_h_t = max(14.0, last["y1"] - last["y0"])
+            ty_limit = last["y1"] + line_h_t
+            while any(abs(ty - py) < 26 for py in placed_t) and ty + 26 <= ty_limit:
+                ty += 26
+            placed_t.append(ty)
+            tx = max(2.0, min(last["x1"] + 14, tcw - 6 - width))
+            tx, t_dy, t_shrink = _clear_x_for_mark(
+                student_doc, by_lid, last["page"], ty, tx, width, tcw - 6 - width,
+                # This is a text label, not a small circled numeral.  Probe the
+                # whole label width; probing only a 12pt disc at its centre let
+                # the ends of labels such as ``Q16 5/6`` print through an answer
+                # even though the centre happened to sit over blank paper.
+                own_lid=last["lid"], probe_dx=width / 2,
+                probe_r=max(size * 0.8, width * 0.52),
+                lift_max=min(_MARK_LIFT_MAX, line_h_t * 0.5))
+            ty += t_dy
+            size *= t_shrink
+            try:
+                tpg.insert_text((tx, ty + size * 0.35), total_txt, fontsize=size,
+                                color=RED, fontname="hebo")
+            except Exception:
+                pass
     else:
         # Single mark question: draw one tick (or cross).
         # OBJECTIVE (MCQ / assertion-reason / match): anchor to the question's OWN
@@ -1293,11 +2032,6 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
         # header → the MCQ-drift bug). DESCRIPTIVE answers mark where the writing
         # ENDS (last line). Either way keep the mark on the first answer line's page:
         # an out-of-order band can bleed onto a LATER page holding another section.
-        is_obj = (
-            bool(getattr(m, "objective", False))
-            or bool(str(getattr(m, "correct_option", "") or "").strip())
-            or bool(str(getattr(m, "chosen_option", "") or "").strip())
-        )
         # Bound for the anti-overlap nudge: a line-anchored mark may move at most
         # ~one line-height from its anchor, so it can never cascade onto a different
         # answer. None == unbounded (the y_fraction fallback has no real line).
@@ -1320,14 +2054,16 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             y_mark = float(getattr(m, "y_fraction", 0.1) or 0.1) * rect.height
             x_end = 200.0
             mark_page_num = page_num
+            # No line was resolved, so there is no handwriting to size against:
+            # 0 tells _tick_size_for_line to use the sheet's default size.
+            line_h = 0.0
 
         # Stagger vertically against every mark already placed on this page (across
         # ALL questions) so dense pages — e.g. the MCQ block — never overlap. The
         # search is BOUNDED to the mark's own line window so an MCQ tick/cross stays
         # on its answer instead of being shoved onto the next question's line.
         placed = placed_by_page.setdefault(mark_page_num, [])
-        ceiling = mark_page.rect.height - 20
-        floor_y = 24.0
+        floor_y, ceiling = _owned_y_bounds(mark_page_num, mark_page.rect.height)
         y_mark = max(floor_y, min(y_mark, ceiling))
         thr = 16 if is_obj else 26
         step = 16 if is_obj else 30
@@ -1335,7 +2071,7 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
         def _coll(yy: float) -> bool:
             return any(abs(yy - py) < thr for py in placed)
 
-        if _coll(y_mark):
+        if not is_obj and _coll(y_mark):
             lo = floor_y if y_lo is None else max(floor_y, y_lo)
             hi = ceiling if y_hi is None else min(ceiling, y_hi)
             slot = None
@@ -1354,328 +2090,268 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # accept a small overlap, rather than drifting it onto another answer.
             if slot is not None:
                 y_mark = slot
-        placed.append(y_mark)
+        if not is_obj:
+            placed.append(y_mark)
 
-        # OBJECTIVE questions: a single tick (correct) or cross (wrong) — NO circled
-        # number. The score is shown in the clean right-hand MARKS column, so dense
-        # MCQ pages don't pile up numbers.
-        if is_obj:
-            tick_size = 26
-            tick_x = max(2.0, min(x_end + 16, mcw - 6 - tick_size * 1.6))
-            if aw >= mx and mx > 0:
-                _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
-            elif not unattempted:   # attempted-but-wrong → cross; blank → nothing
-                _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
-            # unattempted → nothing inline (the margin column says "Unattempted")
-        else:
-            tick_size = 32
-            # Reserve the tick+circle cluster so it never spills onto the strip.
-            circle13_r = 13 * (1.8 if float(aw).is_integer() else 1.9) + 1.5
-            cluster_w = tick_size * 1.7 + circle13_r
+        # Objective verdicts are rendered only in the QID-labelled margin lane.
+        if not is_obj:
+            tick_size = _tick_size_for_line(32, line_h,
+                                            answer_lines=len(anchor_lines))
+            cluster_w = tick_size * 1.6
             tick_x = max(2.0, min(x_end + 20, mcw - 6 - cluster_w))
-            if aw <= 1e-6:  # Zero marks
+            # Same clearance as a step mark. Without it a whole-question mark lands
+            # in the amounts column of a ledger row exactly as the step marks did.
+            if anchor_lines:
+                tick_x, whole_dy, w_shrink = _clear_x_for_mark(
+                    student_doc, by_lid, mark_page_num, y_mark, tick_x, cluster_w,
+                    mcw - 6 - cluster_w, own_lid=anchor.get("lid", ""),
+                    probe_dx=tick_size * 0.75, probe_r=tick_size * 0.85,
+                    # The bound this branch already sets for itself: "a line-anchored
+                    # mark may move at most ~one line-height from its anchor, so it
+                    # can never cascade onto a different answer".
+                    lift_max=min(_MARK_LIFT_MAX, line_h))
+                y_mark += whole_dy
+                tick_size *= w_shrink
+            if safe_layout:
+                pass
+            elif aw <= 1e-6:  # Zero marks
                 if not unattempted:   # attempted-but-wrong → cross; unattempted → nothing
                     _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
-            else:  # Positive marks - draw tick and circled mark
-                _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
-                circle_x = tick_x + tick_size * 1.7
-                _draw_number_in_circle(mark_page, circle_x, y_mark,
-                                      str(int(aw)) if float(aw).is_integer() else f"{aw:g}",
-                                      size=13, seed=seed + "c")  # Increased size to 13
+                    marked_on_sheet = True
+            else:
+                # Same rule for a whole descriptive answer: tick only for full marks,
+                # otherwise the score alone. Half a mark with a tick beside it reads
+                # to a student as "this was right".
+                if mx > 0 and aw >= mx - 1e-6:
+                    _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+                    marked_on_sheet = True
+                # The authoritative score is already printed in the margin. Do not
+                # circle it over the student's final line, where it can obscure a
+                # value or make a partial answer appear fully accepted.
+
+            # A part-marked answer carries ONE score, so the element that earned
+            # nothing is invisible unless it is struck on its own line. The reviewer
+            # asked for exactly this twice — "cross is not there for wrong point", and
+            # "the student's wrong point should be crossed... not left appearing
+            # equally accepted". The per-step path already crosses its zeros; a
+            # question scored as a single mark did not, so on Q1(a)(i) the invented
+            # provision was reduced to nothing and still looked accepted on the page.
+            for zc in (() if safe_layout else (getattr(m, "criteria", None) or [])):
+                if float(getattr(zc, "awarded", 0) or 0) > 1e-6:
+                    continue
+                zl = by_lid.get((getattr(zc, "step_line_id", "") or "").strip())
+                if not zl or zl["page"] != mark_page_num:
+                    continue
+                zpg = student_doc[zl["page"] - 1]
+                zw = _ms(20)
+                zx = max(2.0, min(zl["x1"] + 12, _content_width(zpg) - 8 - zw))
+                zy = (zl["y0"] + zl["y1"]) / 2
+                zx, zdy, zsh = _clear_x_for_mark(
+                    student_doc, by_lid, zl["page"], zy, zx, zw * 1.6,
+                    _content_width(zpg) - 6 - zw * 1.6, own_lid=zl["lid"],
+                    probe_dx=zw * 0.75, probe_r=zw * 0.85, probe_dy=-zw * 0.55,
+                    lift_max=0.0)
+                _draw_cross(zpg, zx, zy + zdy, size=zw * zsh, seed=seed + "z" + zl["lid"])
 
     # Show calculation/remark in the strip. Only show the per-step breakdown
     # ("1+1=2/2") when this question was actually marked step-by-step on the
     # sheet — otherwise (descriptive / empty band) show the plain score so the
     # strip never advertises steps the sheet doesn't show.
+    if unattempted:
+        # Nothing of this question exists on the sheet, so there is no right page for
+        # a margin note — it would land on page 1 beside some other answer ("Q5.a 0/5
+        # Unattempted" next to Answer-2). The cover's "Where marks were lost" lists it.
+        return
     y_strip = (anchor_lines[0]["y0"] + anchor_lines[0]["y1"]) / 2 if anchor_lines else rect.height * 0.5
+    # Print the marks the sheet actually carries, and only when they reconcile to the
+    # score the strip is claiming. A breakdown the student cannot follow on the page is
+    # worse than no breakdown: they count the ticks, come up short, and have no way to
+    # tell whether the missing mark was lost or forgotten.
+    shown = [s for s in drawn_steps]
+    if not (shown and abs(sum(shown) - aw) <= 0.001):
+        shown = []
+    # The strip's tick is a FALLBACK, not a second opinion. It exists for the answers
+    # the sheet cannot carry a mark for — objective items, which are marked only in
+    # this lane so a tick cannot drift onto a neighbouring option, and margin-only
+    # release mode. When the sheet already shows the verdict, the strip prints the
+    # score and the reason and leaves the ticking to the page.
+    verdict = ""
+    if not marked_on_sheet:
+        if mx > 0 and aw >= mx - 1e-6:
+            verdict = "correct"
+        elif aw <= 1e-6:
+            verdict = "wrong"
+    steps_shown = shown if (use_step_marks and len(shown) > 1) else None
+    if is_obj and objective_queue is not None:
+        # An MCQ verdict is a LIST, and a list has an order. Placing each one beside
+        # its own anchor put them wherever the answers happened to fall: this paper
+        # writes Ans 1-4 down the left of the page and Ans 5-8 down the right, so the
+        # pairs share a row, collide in the strip, and come out "Q8, Q6, Q4, Q2, Q5,
+        # Q7" with two of them pushed onto the next page. Hand them to the caller and
+        # let it lay them out in question order once every anchor is known.
+        objective_queue.append({
+            "page": page, "qid": qid, "awarded": aw, "max": mx, "remark": remark,
+            "y": y_strip, "steps": steps_shown, "verdict": verdict,
+        })
+        return
     _draw_strip_entry(page, qid, aw, mx, remark, y_strip,
-                      steps=steps if (use_step_marks and len(steps) > 1) else None)
+                      steps=steps_shown, verdict=verdict)
     return
 
 
-def _render_question_marks_LEGACY(student_doc: fitz.Document, m, my_lines: list[dict],
-                            by_lid: dict[str, dict]) -> None:
-    """Deprecated inline placement (kept for reference; no longer called)."""
-    criteria = list(getattr(m, "criteria", []) or [])
+# "Answer-2", "Ans 3", "Answer No. 4" — the label a student writes above each answer.
+# group(1) is the number; the caller also checks the line is mostly just this label.
+_ANSWER_HEADING_RE = re.compile(
+    r"^(?:answer|ans|उत्तर)\s*(?:no\.?)?\s*[-–—:.)#]*\s*(\d{1,2})\b",
+    re.IGNORECASE)
 
-    # Inject synthetic diagram anchors so criteria without a real OCR line
-    # have somewhere to land that isn't a text line.
-    my_lines_aug = _add_diagram_anchors(my_lines)
 
-    # Stage 1: honour explicit step_line_id when it's a real line we know about
-    # AND it's inside this question's band.
-    band_lids = {pl["lid"] for pl in my_lines_aug}
-    assigned: dict[int, dict] = {}
-    unassigned_idx: list[int] = []
-    for ci, c in enumerate(criteria):
-        lid = (getattr(c, "step_line_id", "") or "").strip()
-        if lid in band_lids:
-            # find the pl in my_lines_aug
-            pl = next(p for p in my_lines_aug if p["lid"] == lid)
-            assigned[ci] = pl
-        else:
-            unassigned_idx.append(ci)
+def _heading_num(text: str) -> int | None:
+    """The answer number when `text` is an 'Answer-N' heading, else None.
 
-    # Stage 2: distribute unassigned criteria across band candidates (prefer
-    # real, non-header text lines). Synthetic "[diagram]" anchors sit in blank
-    # bands — only use them when the model EXPLICITLY anchored a step there
-    # (Stage 1). Distributing a normal sub-question's tick onto one drops a
-    # floating mark on empty paper (the stray "✓ 1" in the page's blank tail).
-    if unassigned_idx and my_lines_aug:
-        candidates = [pl for pl in my_lines_aug
-                      if not _is_header(pl["text"]) and not _is_synthetic_anchor(pl)]
-        if not candidates:
-            # Genuinely no real text line in the band — fall back to diagram
-            # anchors (diagram-only question) rather than nothing.
-            candidates = [pl for pl in my_lines_aug if not _is_header(pl["text"])] \
-                or my_lines_aug[:]
-        n = len(unassigned_idx)
-        for k, ci in enumerate(unassigned_idx):
-            idx = min(int((k + 0.5) * len(candidates) / max(1, n)), len(candidates) - 1)
-            assigned[ci] = candidates[idx]
+    Headings are short labels — the line must be mostly the label itself, so
+    prose like "answer 4 marks were given because..." never registers. Mathpix
+    sometimes returns a handwritten heading wrapped in a LaTeX array
+    ('\\[\\begin{array}{l}\\text { Answer-2 } ...'), so the first \\text{} chunk
+    is tested too."""
+    candidates = [text.strip()]
+    chunks = re.findall(r"\\text\s*\{([^{}]*)\}", text)
+    if chunks:
+        candidates.append(chunks[0].strip())
+    for t in candidates:
+        m = _ANSWER_HEADING_RE.match(t)
+        if m and len(t) <= 28 and len(t[m.end():].strip()) <= 10:
+            return int(m.group(1))
+    return None
 
-    # Stage 3: collision/header resolution — push duplicates or header-anchored
-    # criteria down to the next free non-header line in the band (across pages).
-    used_lids: set[str] = set()
-    order_for_resolve = sorted(
-        assigned.keys(),
-        key=lambda ci: (assigned[ci]["page"], assigned[ci]["y0"], assigned[ci]["x0"]),
-    )
-    for ci in order_for_resolve:
-        pl = assigned[ci]
-        # An explicit diagram anchor (Stage 1) is fine to keep; only MOVE when
-        # the line is a duplicate or a header. When we do move, never relocate
-        # onto a synthetic blank-band anchor.
-        needs_move = pl["lid"] in used_lids or _is_header(pl["text"])
-        if needs_move:
-            later = [
-                p for p in my_lines_aug
-                if (p["page"], p["y0"]) >= (pl["page"], pl["y0"])
-                and p["lid"] not in used_lids
-                and not _is_header(p["text"])
-                and not _is_synthetic_anchor(p)
-            ]
-            if later:
-                pl = later[0]
-                assigned[ci] = pl
-        used_lids.add(pl["lid"])
 
-    # Stage 4: render. Group already-drawn glyph rects per page so collisions
-    # are tracked separately on each page.
-    used_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
-    font_size = 15
-    MIN_GAP_X = 14.0
-    MIN_GAP_Y = 6.0
+def _answer_headings(lines_by_page: dict[int, list[dict]]) -> list[dict]:
+    """Every 'Answer-N' heading the student wrote, in document order."""
+    out: list[dict] = []
+    for pn in sorted(lines_by_page):
+        for pl in lines_by_page[pn]:
+            num = _heading_num(pl.get("text") or "")
+            if num is not None:
+                out.append({"page": pn, "y0": pl["y0"], "y1": pl["y1"],
+                            "num": num, "lid": pl["lid"]})
+    return out
 
-    ordered = sorted(
-        [ci for ci in range(len(criteria)) if ci in assigned],
-        key=lambda ci: (assigned[ci]["page"], assigned[ci]["y0"], assigned[ci]["x0"]),
-    )
-    # Reserve a right-edge safety zone — the tick AND its trailing number must
-    # both fit inside the page, never on top of the red margin line.
-    SAFE_RIGHT_PAD = 12.0  # min distance the rightmost glyph stays from rect.width
 
-    # --- Decide if this question gets step-by-step ticks or one tick + total. ---
-    # A human teacher only puts per-step marks on numerical work or questions
-    # with explicit sub-parts. Pure descriptive answers get one tick and the
-    # total at the end.
-    qid = str(getattr(m, "qid", "") or "")
-    has_subparts = "(" in qid
-    band_text = " ".join((pl.get("text") or "") for pl in my_lines_aug)
-    looks_numerical = any(sym in band_text for sym in ("=", "→", "Ω", "Ω", "Rs", "R_")) \
-        or sum(ch.isdigit() for ch in band_text) >= 6
-    use_step_marks = (has_subparts or looks_numerical) and len(ordered) >= 2
+def _snap_to_answer_headings(student_doc: fitz.Document, questions: list,
+                             lines_by_page: dict[int, list[dict]],
+                             by_lid: dict[str, dict]) -> None:
+    """Validate every question's anchor against the student's own 'Answer-N'
+    headings and snap the ones that drifted.
 
-    if not use_step_marks and ordered:
-        # Theoretical / single-flow answer: just one tick + total at the last
-        # real line of the band. Skip individual step ticks.
-        # Anchor to the last NON-HEADER line so the tick never lands on a form
-        # label / section header (e.g. the signature box at the top of a page).
-        non_header_ordered = [c for c in ordered
-                              if not _is_header(assigned[c].get("text") or "")]
-        if not non_header_ordered:
-            # Nothing real to anchor to — keep the written reason, drop the tick.
-            _draw_remark_on_band(student_doc, m, my_lines_aug, by_lid)
-            return
-        last_ci = non_header_ordered[-1]
-        pl = assigned[last_ci]
-        page = student_doc[pl["page"] - 1]
-        rect = page.rect
-        seed = f"{m.qid}|total"
-        total_awarded = sum(float(getattr(criteria[c], "awarded", 0) or 0) for c in ordered)
-        max_total = sum(float(getattr(criteria[c], "max", 0) or 0) for c in ordered)
-        score_txt = (str(int(total_awarded)) if float(total_awarded).is_integer()
-                     else f"{total_awarded:g}")
-        text_w = _number_width(score_txt, size=font_size)
-        full_credit = total_awarded > 0 and total_awarded >= max_total * 0.999
-        partial_credit = 0 < total_awarded < max_total
-        tick_size = 24
-        glyph_w = tick_size * 1.5 if (full_credit or partial_credit) else 0
-        cluster_w = glyph_w + (4 if glyph_w else 0) + text_w
-        max_right = rect.width - SAFE_RIGHT_PAD
-        cx = min(pl["x1"] + 14 + _wobble(seed, 0, amp=6), max_right - cluster_w)
-        cx = max(pl["x0"], cx)
-        cy = (pl["y0"] + pl["y1"]) / 2 + _wobble(seed, 1, amp=2)
-        if full_credit or partial_credit:
-            _draw_tick(page, cx, cy, size=tick_size, seed=seed + "t")
-            num_x = cx + glyph_w + 4
-        else:
-            _draw_cross(page, cx + 8, cy, size=16, seed=seed + "x")
-            num_x = cx + 20
-        _draw_number(page, num_x, cy, score_txt, size=font_size, seed=seed + "n")
-        _draw_remark_on_band(student_doc, m, my_lines_aug, by_lid)
+    The model occasionally anchors a question inside the PREVIOUS answer's
+    working (e.g. Q4's mark landing in Q3's cash-book totals). The handwritten
+    heading is ground truth for where answer N starts, so: if a question's
+    current anchor falls outside every region belonging to its own number, move
+    it to just below that number's last heading (last, because students strike
+    out a false start and rewrite the heading further on)."""
+    headings = _answer_headings(lines_by_page)
+    if not headings:
         return
 
-    # If the question scored zero AND the model gave a remark, skip drawing
-    # individual zero-credit crosses for each criterion. The cursive remark
-    # ("Unattempted." / "Incorrect answer.") already conveys the same info,
-    # and a floating "✗" in the right margin next to a blank line just looks
-    # like noise.
-    suppress_zero_crosses = (
-        float(getattr(m, "score", 0) or 0) <= 0
-        and (getattr(m, "remark", "") or "").strip() != ""
-    )
+    def region_end(i: int) -> tuple[int, float]:
+        if i + 1 < len(headings):
+            nxt = headings[i + 1]
+            return (nxt["page"], nxt["y0"])
+        last = len(student_doc)
+        return (last, student_doc[last - 1].rect.height + 1000.0)
 
-    for ci in ordered:
-        c = criteria[ci]
-        pl = assigned[ci]
-        # Never draw any mark on a header / form-label line (signature box,
-        # "Section-B", bare "Q2", "(i)"). Synthetic diagram anchors ("[diagram]")
-        # are not headers, so diagram ticks still land correctly.
-        if _is_header(pl.get("text") or ""):
+    def region_content(i: int) -> int:
+        """Real (non-heading, non-header) lines inside heading i's region. A
+        struck-out false start ('Answer-6 / Hari', rewritten on the next page)
+        has almost none — the rewrite's region holds the actual answer."""
+        start = (headings[i]["page"], headings[i]["y1"])
+        end = region_end(i)
+        n = 0
+        for pn in range(headings[i]["page"], min(end[0], len(student_doc)) + 1):
+            for pl in lines_by_page.get(pn, []):
+                mid = (pn, (pl["y0"] + pl["y1"]) / 2)
+                if start < mid < end and not _is_header(pl.get("text") or ""):
+                    n += 1
+        return n
+
+    by_num: dict[int, list[int]] = {}
+    for i, h in enumerate(headings):
+        by_num.setdefault(h["num"], []).append(i)
+
+    for q in questions:
+        m = re.match(r"\s*[Qq]?\s*(\d{1,2})", str(getattr(q, "qid", "") or ""))
+        if not m:
             continue
-        page = student_doc[pl["page"] - 1]
-        rect = page.rect
-        seed = f"{m.qid}|c{ci}|{pl['lid']}"
-        awarded = float(getattr(c, "awarded", 0) or 0)
-        is_tick = awarded > 0
-        if not is_tick and suppress_zero_crosses:
-            continue
-        # Also skip a zero-credit cross if the assigned line is a header / has
-        # no real student text past the label — there's nothing meaningful to
-        # mark wrong, so the floating margin "✗" would mislead.
-        if not is_tick:
-            line_text = (pl.get("text") or "").strip()
-            if _is_header(line_text) or len(line_text) <= 2:
+        idxs = by_num.get(int(m.group(1)))
+        if not idxs:
+            continue                      # student never labelled this answer
+        best = max(idxs, key=region_content)
+        # Where does the model currently place this question?
+        pl = by_lid.get(getattr(q, "anchor_line_id", "") or "")
+        if pl:
+            pos = (pl["page"], (pl["y0"] + pl["y1"]) / 2)
+        else:
+            pn = max(1, min(int(getattr(q, "page", 1) or 1), len(student_doc)))
+            pos = (pn, float(getattr(q, "y_fraction", 0.5) or 0.5)
+                   * student_doc[pn - 1].rect.height)
+        h = headings[best]
+        if (h["page"], h["y0"] - 6) <= pos < region_end(best):
+            continue                      # anchor already inside the real answer
+        page_h = student_doc[h["page"] - 1].rect.height
+        q.page = h["page"]
+        q.anchor_line_id = ""             # re-resolve from the heading downward
+        q.y_fraction = min(0.995, (h["y1"] + 2.0) / page_h)
+
+
+def _objective_lane_key(qid: str) -> tuple:
+    """Paper order for an MCQ list: Q2 before Q10, Q5.a before Q5.b."""
+    match = re.match(r"\s*[Qq]?\s*(\d+)", qid or "")
+    suffix = "".join(ch for ch in (qid or "") if ch.isalpha()).lower().lstrip("q")
+    return (int(match.group(1)) if match else 9999, suffix)
+
+
+def _draw_objective_lane(student_doc: fitz.Document, queue: list[dict]) -> None:
+    """Draw every objective verdict as one ordered list per page.
+
+    Each entry keeps the page its own answer is on - an MCQ verdict must never move
+    to another sheet - but WITHIN that page they are laid out in question order from
+    the first entry's position downwards, so the column reads Q1, Q2, Q3... instead
+    of the order their anchors happened to resolve in.
+    """
+    if not queue:
+        return
+    by_page: dict[int, list[dict]] = {}
+    for entry in queue:
+        by_page.setdefault(entry["page"].number, []).append(entry)
+
+    # An MCQ block is answered in one place, so a verdict that resolved somewhere else
+    # on its own has drifted. On this paper the student headed answers "Ans 1) b)" and
+    # "Ans 3 (a)", and the objective Q1 and Q3 anchored to THOSE - landing their
+    # verdicts on pages 2 and 3 while the other six sat on page 1 beside the actual
+    # MCQ answers. A page carrying a single stray verdict hands it back to the page
+    # holding the block; a genuine split (four and four, say) keeps both.
+    if len(by_page) > 1:
+        home = max(by_page, key=lambda pn: (len(by_page[pn]), -pn))
+        for page_number in [pn for pn in by_page if pn != home]:
+            if len(by_page[page_number]) >= 2:
                 continue
-
-        used = used_by_page.setdefault(pl["page"], [])
-
-        if is_tick:
-            size = 24 + _wobble(seed, 2, amp=5.0)
-            glyph_w = size * 1.5
-            glyph_h = size * 1.65
-        else:
-            size = 16 + _wobble(seed, 3, amp=3.0)
-            glyph_w = size
-            glyph_h = size
-
-        # Total width of the tick+number cluster (so we never split the unit
-        # past the page edge with the number stranded against the margin).
-        # Per-step: show marks awarded for THIS step only (not the running
-        # total). Cumulative numbers confused readers — a human teacher writes
-        # "1" next to each correctly-done step, not 1, 2, 3...
-        num_txt = ""
-        num_w = 0.0
-        if awarded > 0:
-            num_txt = str(int(awarded)) if float(awarded).is_integer() else f"{awarded:g}"
-            num_w = _number_width(num_txt, size=font_size)
-        cluster_w = glyph_w + (4 + num_w if num_w else 0)
-
-        offset = 8 + abs(_wobble(seed, 0, amp=14))
-        sx = pl["x1"] + offset
-        sy = (pl["y0"] + pl["y1"]) / 2 + _wobble(seed, 1, amp=3)
-
-        # If the whole cluster won't fit to the right of where the writing ends,
-        # drop it to a fresh line below — same column as the line start so it
-        # stays inside the writing area and never overlaps the red margin.
-        max_right = rect.width - SAFE_RIGHT_PAD
-        if sx + cluster_w > max_right:
-            # Place below the line; pull the cluster left if needed.
-            sy = pl["y1"] + glyph_h * 0.55
-            sx = min(pl["x1"] + offset, max_right - cluster_w)
-            sx = max(pl["x0"], sx)
-
-        # Collision resolution against earlier glyphs on the same page.
-        for _ in range(8):
-            bumped = False
-            for ux0, uy0, ux1, uy1 in used:
-                if (sx < ux1 + MIN_GAP_X and sx + cluster_w > ux0 - MIN_GAP_X
-                        and sy - glyph_h / 2 < uy1 + MIN_GAP_Y
-                        and sy + glyph_h / 2 > uy0 - MIN_GAP_Y):
-                    sx = ux1 + MIN_GAP_X
-                    bumped = True
-            if not bumped:
-                break
-            # If pushing right has shoved us past the safe edge, wrap below.
-            if sx + cluster_w > max_right:
-                sy += glyph_h + 4
-                sx = max(pl["x0"], max_right - cluster_w)
-                break
-
-        # Final hard clamp — never let any part of the cluster cross the edge.
-        if sx + cluster_w > max_right:
-            sx = max(4.0, max_right - cluster_w)
-
-        if is_tick:
-            _draw_tick(page, sx, sy, size=size, seed=seed)
-            tick_end_x = sx + size * 1.5
-        else:
-            _draw_cross(page, sx + size * 0.4, sy, size=size, seed=seed)
-            tick_end_x = sx + size * 1.0
-
-        used.append((sx, sy - glyph_h / 2, sx + glyph_w, sy + glyph_h / 2))
-
-        if num_txt:
-            nx = tick_end_x + 4 + _wobble(seed, 4, amp=1.0)
-            # Keep the number anchored to its tick — never clamp it independently
-            # to the right edge (that's what produced "orphan tick + lonely number"
-            # when the tick fell off-page).
-            if nx + num_w > max_right:
-                nx = max_right - num_w
-            ny_center = sy + _wobble(seed, 5, amp=1.0)
-            _draw_number(page, nx, ny_center, num_txt,
-                         size=font_size, seed=seed + "n")
-            used.append((nx, ny_center - font_size / 2,
-                         nx + num_w, ny_center + font_size / 2))
-
-    # Fallback: if no criteria rendered (1-mark questions), drop the score next
-    # to the last text line of the band.
-    if not ordered:
-        score = m.score
-        score_txt = str(int(score)) if float(score).is_integer() else f"{score:g}"
-        seed = f"{m.qid}|score"
-        text_w = _number_width(score_txt, size=font_size)
-        real_lines = [pl for pl in my_lines if not _is_header(pl["text"])] or my_lines
-        has_tick = float(m.score) >= float(m.max_score) and m.max_score > 0
-        # Cluster = tick (≈36pt wide) + 4 gap + number, so reserve that much.
-        cluster_w = (36 + 4 if has_tick else 0) + text_w
-        if real_lines:
-            target = real_lines[-1]
-            page = student_doc[target["page"] - 1]
-            rect = page.rect
-            max_right = rect.width - 12
-            cluster_x = min(target["x1"] + 18 + _wobble(seed, 0, amp=6),
-                            max_right - cluster_w)
-            cluster_x = max(target["x0"], cluster_x)
-            cy = (target["y0"] + target["y1"]) / 2 + _wobble(seed, 1, amp=2)
-        else:
-            page = student_doc[m.page - 1]
-            rect = page.rect
-            max_right = rect.width - 12
-            cy = m.y_fraction * rect.height
-            cluster_x = max(20.0, max_right - cluster_w)
-        if has_tick:
-            _draw_tick(page, cluster_x, cy, size=24, seed=seed + "t")
-            cx = cluster_x + 36 + 4
-        else:
-            cx = cluster_x
-        _draw_number(page, cx, cy, score_txt,
-                     size=font_size, seed=seed + "n")
-
-    # Teacher's handwritten reason — drawn for both the step-tick path AND the
-    # fallback path. Skipped automatically if remark is empty or full marks.
-    _draw_remark_on_band(student_doc, m, my_lines_aug, by_lid)
+            home_page = by_page[home][0]["page"]
+            for entry in by_page.pop(page_number):
+                entry["page"] = home_page
+                entry["y"] = max(e["y"] for e in by_page[home])
+                by_page[home].append(entry)
+    for entries in by_page.values():
+        entries.sort(key=lambda e: _objective_lane_key(e["qid"]))
+        # Start the list where its earliest answer sits, then let the strip's own slot
+        # reservation stack the rest under it in the order handed over.
+        cursor = min(e["y"] for e in entries)
+        for entry in entries:
+            bottom = _draw_strip_entry(
+                entry["page"], entry["qid"], entry["awarded"], entry["max"],
+                entry["remark"], cursor, steps=entry["steps"],
+                verdict=entry["verdict"])
+            if bottom is not None:
+                cursor = bottom + 4.0
 
 
 def _annotate_questions(student_doc: fitz.Document, questions: list,
@@ -1685,6 +2361,8 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
     criteria can be placed on any page in that band."""
     if not questions:
         return
+
+    objective_queue: list[dict] = []
 
     # Convert OCR lines to PDF coords per page, once.
     lines_by_page: dict[int, list[dict]] = {}
@@ -1705,6 +2383,10 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
 
     by_lid: dict[str, dict] = {pl["lid"]: pl for plist in lines_by_page.values() for pl in plist}
 
+    # The student's own "Answer-N" headings are ground truth for where each
+    # answer lives — snap any model anchor that drifted into another answer.
+    _snap_to_answer_headings(student_doc, questions, lines_by_page, by_lid)
+
     def _first_real_line_at_or_below(page_num: int, y_min: float) -> dict | None:
         """Find the first non-header OCR line at/below y_min on page_num, walking
         onto subsequent pages if needed. Returns None if nothing real exists."""
@@ -1718,6 +2400,21 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
                 cands.sort(key=lambda r: r["y0"])
                 return cands[0]
         return None
+
+    def own_anchor_span(q) -> tuple[int, float] | None:
+        """Furthest (page, y) this question's OWN criteria explicitly anchor to.
+
+        None means the model located nothing of this question on the sheet — which
+        is what an unattempted question looks like."""
+        best = None
+        for c in (getattr(q, "criteria", None) or []):
+            pl = by_lid.get((getattr(c, "step_line_id", "") or "").strip())
+            if pl is None:
+                continue
+            pos = (pl["page"], (pl["y0"] + pl["y1"]) / 2)
+            if best is None or pos > best:
+                best = pos
+        return best
 
     def q_anchor(q) -> tuple[int, float]:
         pl = by_lid.get(getattr(q, "anchor_line_id", "") or "")
@@ -1759,6 +2456,26 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
             # include the bottom: pretend end_y is just past the page bottom
             end_y = end_y + 1
 
+        # A long answer routinely runs PAST the point where the next question was
+        # anchored — most often because that next question was never attempted and
+        # still got a nominal position on this page. Left alone, the band stops
+        # there, every criterion anchored beyond it is rejected as out-of-band, and
+        # Stage 2 drags those ticks back onto the first page: a 100-mark CA answer
+        # spanning pages 2-4 got all 23 ticks on page 2 and left 3-4 unmarked.
+        # Extend the band to the furthest line THIS question actually anchored,
+        # stepping over following questions that located nothing of their own.
+        span = own_anchor_span(q)
+        if span is not None and qi + 1 < len(qs_sorted) and span > (end_page, end_y):
+            j = qi + 1
+            while (j < len(qs_sorted) and own_anchor_span(qs_sorted[j]) is None
+                   and q_anchor(qs_sorted[j]) <= span):
+                j += 1
+            limit = q_anchor(qs_sorted[j]) if j < len(qs_sorted) else None
+            if limit is None or limit > span:
+                end_page, end_y = span[0], span[1] + 8
+            else:
+                end_page, end_y = limit
+
         my_lines: list[dict] = []
         for pn in range(start_page, end_page + 1):
             for pl in lines_by_page.get(pn, []):
@@ -1769,280 +2486,103 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
                     continue
                 my_lines.append(pl)
 
-        _render_question_marks(student_doc, q, my_lines, by_lid, placed_by_page)
-
-
-def _annotate_student_page(page: fitz.Page, marks_on_page: list,
-                           line_index: dict | None = None) -> None:
-    """Annotate the page like a human teacher would:
-
-    - Step ticks/crosses sit just past where the writing ends on each line
-      (NOT in a fixed right-edge column) — short lines get marked mid-page,
-      long lines get marked near the right edge, exactly where the pen lands.
-    - The overall score for a question is written next to the END of its
-      last answer line and circled. No column, no fixed x.
-    - If criteria don't carry `step_line_id`, ticks are distributed across
-      the question's answer lines so step marking still appears.
-    """
-    rect = page.rect
-    line_index = line_index or {}
-    page_num = page.number + 1  # fitz pages are 0-indexed
-
-    # All OCR lines on THIS page, with PDF-coord bboxes, sorted top-to-bottom.
-    page_lines: list[dict] = []
-    for lid, (p, bbox_px, img_w, img_h, text) in line_index.items():
-        if p != page_num:
-            continue
-        x0, y0, x1, y1 = _pdf_coords_from_line(page, bbox_px, img_w, img_h)
-        page_lines.append({
-            "lid": lid, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "text": text,
-        })
-    page_lines.sort(key=lambda r: r["y0"])
-    by_lid = {pl["lid"]: pl for pl in page_lines}
-
-    def anchor_y(m) -> float:
-        pl = by_lid.get(m.anchor_line_id or "")
-        if pl:
-            return (pl["y0"] + pl["y1"]) / 2
-        return m.y_fraction * rect.height
-
-    marks_sorted = sorted(marks_on_page, key=anchor_y)
-
-    # Figure out the vertical band each question owns: from its own anchor to
-    # the next question's anchor (or page bottom). This lets us collect the
-    # answer lines for that question — used both for step-tick distribution
-    # and for placing the score circle next to the LAST line of the answer.
-    bands: list[tuple[float, float]] = []
-    for i, m in enumerate(marks_sorted):
-        y_top = anchor_y(m) - 6
-        y_bot = anchor_y(marks_sorted[i + 1]) - 6 if i + 1 < len(marks_sorted) else rect.height
-        bands.append((y_top, y_bot))
-
-    for m, (y_top, y_bot) in zip(marks_sorted, bands):
-        my_lines = [pl for pl in page_lines if y_top <= (pl["y0"] + pl["y1"]) / 2 < y_bot]
-
-        # ---------------- step marks ----------------
-        criteria = list(getattr(m, "criteria", []) or [])
-
-        # 1) Honour explicit step_line_id from Claude where given.
-        # 2) For the rest, spread them across `my_lines` so we still get
-        #    visible step ticks even when the model didn't anchor them.
-        assigned: dict[int, dict] = {}
-        unassigned_idx: list[int] = []
-        for ci, c in enumerate(criteria):
-            lid = getattr(c, "step_line_id", "") or ""
-            if lid in by_lid:
-                assigned[ci] = by_lid[lid]
-            else:
-                unassigned_idx.append(ci)
-
-        if unassigned_idx and my_lines:
-            # Skip the very first line if it likely starts with "Q.." — that's
-            # the question header, not a working step.
-            candidates = my_lines[:]
-            if candidates and candidates[0]["text"].strip().lower().startswith(("q.", "q ", "q)")):
-                candidates = candidates[1:] or my_lines
-            n = len(unassigned_idx)
-            for k, ci in enumerate(unassigned_idx):
-                idx = min(int((k + 0.5) * len(candidates) / max(1, n)), len(candidates) - 1)
-                assigned[ci] = candidates[idx]
-
-        # Resolve placement problems Gemini commonly makes:
-        # (1) Multiple criteria share the same step_line_id — push later ones
-        #     down to subsequent answer lines so step ticks land at each step.
-        # (2) A criterion is anchored to a question-header line ("Q.27)", "(a)")
-        #     — push it to the first real working line.
-        def _is_header(text: str) -> bool:
-            s = text.strip().lower()
-            return (s.startswith(("q.", "q ", "q)"))
-                    or (len(s) <= 5 and s.startswith("(") and s.endswith(")")))
-
-        used_lids: set[str] = set()
-        for ci in sorted(assigned.keys(), key=lambda c: (assigned[c]["y0"], assigned[c]["x0"])):
-            pl = assigned[ci]
-            needs_move = pl["lid"] in used_lids or _is_header(pl["text"])
-            if needs_move:
-                later = [p for p in my_lines
-                         if p["y0"] >= pl["y0"]
-                         and p["lid"] not in used_lids
-                         and not _is_header(p["text"])]
-                if later:
-                    pl = later[0]
-                    assigned[ci] = pl
-            used_lids.add(pl["lid"])
-
-        used: list[tuple[float, float, float, float]] = []  # (x0, y0, x1, y1) of each glyph cluster
-        # Render criteria in the order they appear down the page so cumulative
-        # numbers (1, 2, 3...) flow naturally with the answer.
-        ordered = sorted(
-            [ci for ci in range(len(criteria)) if ci in assigned],
-            key=lambda ci: (assigned[ci]["y0"], assigned[ci]["x0"]),
+        _render_question_marks(
+            student_doc, q, my_lines, by_lid, placed_by_page,
+            region_start=(start_page, start_y),
+            region_end=(end_page, end_y),
+            objective_queue=objective_queue,
         )
-        running = 0.0
-        font_size = 15
-        MIN_GAP_X = 14.0  # minimum horizontal padding between adjacent numbers
-        MIN_GAP_Y = 6.0
-        for ci in ordered:
-            c = criteria[ci]
-            pl = assigned[ci]
-            seed = f"{m.qid}|c{ci}|{pl['lid']}"
-            awarded = float(getattr(c, "awarded", 0) or 0)
-            max_c = float(getattr(c, "max", awarded) or awarded)
-            running += awarded
-            # Treat any positive award as a tick. A bare cross is only used
-            # when zero credit was given for that step — otherwise the cross
-            # contradicts the running tally next to it.
-            is_tick = awarded > 0
 
-            # Mark lands just past where the writing actually ends on that line.
-            offset = 8 + abs(_wobble(seed, 0, amp=14))
-            sx = min(pl["x1"] + offset, rect.width - 18)
-            sy = (pl["y0"] + pl["y1"]) / 2 + _wobble(seed, 1, amp=3)
+    _draw_objective_lane(student_doc, objective_queue)
 
-            if is_tick:
-                size = 24 + _wobble(seed, 2, amp=5.0)
-                glyph_w = size * 1.5
-                glyph_h = size * 1.65
-            else:
-                size = 16 + _wobble(seed, 3, amp=3.0)
-                glyph_w = size
-                glyph_h = size
 
-            # Resolve collisions against everything already drawn on this page
-            # (ticks, crosses, *and* their cumulative numbers). Push right as
-            # far as possible; if we hit the page edge, drop to next line.
-            for _ in range(8):
-                bumped = False
-                for ux0, uy0, ux1, uy1 in used:
-                    if (sx < ux1 + MIN_GAP_X and sx + glyph_w > ux0 - MIN_GAP_X
-                            and sy - glyph_h / 2 < uy1 + MIN_GAP_Y
-                            and sy + glyph_h / 2 > uy0 - MIN_GAP_Y):
-                        sx = ux1 + MIN_GAP_X
-                        bumped = True
-                if not bumped:
-                    break
-            if sx + glyph_w > rect.width - 4:
-                # No room on this line — drop just below it.
-                sx = pl["x1"] + 8
-                sy = pl["y1"] + glyph_h * 0.6
-
-            if is_tick:
-                _draw_tick(page, sx, sy, size=size, seed=seed)
-                tick_end_x = sx + size * 1.5
-            else:
-                _draw_cross(page, sx + size * 0.4, sy, size=size, seed=seed)
-                tick_end_x = sx + size * 1.0
-
-            used.append((sx, sy - glyph_h / 2, sx + glyph_w, sy + glyph_h / 2))
-
-            # Running cumulative marks next to the tick — like a teacher
-            # tallying step by step ("1", "2", "3"...). Skip when nothing
-            # was awarded for this step (the cross alone tells the story).
-            if awarded > 0:
-                num_txt = str(int(running)) if float(running).is_integer() else f"{running:g}"
-                num_w = _number_width(num_txt, size=font_size)
-                nx = tick_end_x + 4 + _wobble(seed, 4, amp=1.5)
-                ny_center = sy + _wobble(seed, 5, amp=1.0)
-                # Don't let the number butt up against an earlier glyph.
-                for ux0, uy0, ux1, uy1 in used:
-                    if (nx < ux1 + MIN_GAP_X and nx + num_w > ux0 - MIN_GAP_X
-                            and ny_center - font_size / 2 < uy1 + MIN_GAP_Y
-                            and ny_center + font_size / 2 > uy0 - MIN_GAP_Y):
-                        nx = ux1 + MIN_GAP_X
-                if nx + num_w > rect.width - 4:
-                    nx = rect.width - num_w - 4
-                _draw_number(page, nx, ny_center, num_txt,
-                             size=font_size, seed=seed + "n")
-                used.append((nx, ny_center - font_size / 2,
-                             nx + num_w, ny_center + font_size / 2))
-
-        # ---------------- fallback total ----------------
-        # If no criteria were rendered (1-mark questions, missing OCR), still
-        # drop the score next to the end of the last answer line — no circle.
-        if not ordered:
-            score = m.score
-            score_txt = str(int(score)) if float(score).is_integer() else f"{score:g}"
-            seed = f"{m.qid}|score"
-            text_w = _number_width(score_txt, size=font_size)
-            if my_lines:
-                target = my_lines[-1]
-                cx = min(target["x1"] + 18 + _wobble(seed, 0, amp=6),
-                         rect.width - text_w - 6)
-                cy = (target["y0"] + target["y1"]) / 2 + _wobble(seed, 1, amp=2)
-            else:
-                cy = anchor_y(m)
-                cx = rect.width * 0.82 + _wobble(seed, 0, amp=10)
-            # tick before the number for 1-mark fully-correct answers
-            if float(m.score) >= float(m.max_score) and m.max_score > 0:
-                _draw_tick(page, cx - 30, cy, size=24, seed=seed + "t")
-            _draw_number(page, cx, cy, score_txt,
-                         size=font_size, seed=seed + "n")
-
-        # ---------------- teacher remark (legible) ----------------
-        # When the student lost marks AND the model gave a remark, write a short
-        # reason below the last answer line — clean red on a white backing, with
-        # the sub-question id so it stays unambiguous.
-        if (m.remark and m.remark.strip()
-                and m.score < m.max_score):
-            qid = str(getattr(m, "qid", "") or "").strip()
-            note = f"{qid}: {m.remark.strip()}" if qid else m.remark.strip()
-            if my_lines:
-                last = my_lines[-1]
-                rx = last["x0"] + 12
-                ry = last["y1"] + 16 + _wobble(f"{m.qid}|rk", 0, amp=2)
-            else:
-                rx = 40
-                ry = anchor_y(m) + 18
-            # Clamp to page bounds; if overflowing the bottom, push above the line.
-            if ry > rect.height - 24:
-                ry = (my_lines[-1]["y0"] - 8) if my_lines else (anchor_y(m) - 8)
-            max_w = max(180.0, rect.width - rx - 70)
-            _draw_handwritten_remark(page, rx, ry, note, max_width=max_w,
-                                     size=15.5)
+# A strikethrough cancels a WRONG WORD OR PHRASE. Nothing a student writes justifies a
+# red line across half the page, and a reviewer reading one assumes the sentence under it
+# was wrong. Real copies came back with a strike spanning the full writing width,
+# cancelling a correct statement of law, because `width_fraction` arrived as 1.0.
+_STRIKE_MAX_FRACTION = 0.45
 
 
 def _draw_inline_annotations(page: fitz.Page, annotations: list,
-                             line_index: dict | None = None) -> None:
+                             line_index: dict | None = None,
+                             earned_line_ids: set | None = None) -> None:
     """Mark wrong words ON the student's writing: ✗ for objective slips, and a
     strikethrough through the offending word/phrase. `circle` annotations are
     rendered as strikethroughs too (a circle over busy handwriting reads as
-    clutter; a line through the wrong word is clearer)."""
+    clutter; a line through the wrong word is clearer).
+
+    A strike is only drawn where it can be placed on the actual wrong words. If the
+    target word is not on the target line, or the line earned its marks, the
+    annotation is dropped: a misplaced strike cancels work the student got right,
+    which is worse than no annotation at all.
+    """
     rect = page.rect
     cw = _content_width(page)  # writing-area width (exclude the marks strip)
     line_index = line_index or {}
+    earned_line_ids = earned_line_ids or set()
     for a in annotations:
-        # Treat circle like strikethrough — strike the wrong word instead of
-        # ringing it.
-        is_strike = a.type in ("strikethrough", "circle")
+        # A strike CANCELS; an underline says "look at this". The model asks for a
+        # `circle` when it wants the student to NOTICE a content error — a wrong
+        # figure, a wrong date, a mislabelled item — work the student must still
+        # read. Rendering that as a strike told them it had been deleted, and on a
+        # real copy it crossed out a correct statement of law. Circles underline now.
+        is_strike = a.type == "strikethrough"
+        is_underline = a.type in ("circle", "underline")
+        spans_text = is_strike or is_underline
+        # Never cancel a line that scored its marks — the sheet would contradict
+        # itself. An underline is a pointer, not a verdict, so it is still allowed.
+        if is_strike and a.target_line_id and a.target_line_id in earned_line_ids:
+            continue
         x = y = None
         width = None
+        y_under = None          # where an underline sits, if we know the line box
         if a.target_line_id and a.target_line_id in line_index:
             _, bbox_px, img_w, img_h, line_text = line_index[a.target_line_id]
             x0, y0, x1, y1 = _pdf_coords_from_line(page, bbox_px, img_w, img_h)
             y = (y0 + y1) / 2
+            y_under = y1 - 2.0
+            if a.target_word and line_text.count(a.target_word) > 1:
+                # The word occurs more than once on this line and nothing says which
+                # one is meant. _word_x_in_line takes the FIRST, and the first is
+                # usually the CORRECT use — "Purchases 3,21,700 add omitted
+                # Purchases 400" would be marked on the legitimate entry, up to
+                # 278pt from the error. Say nothing rather than accuse the right one.
+                continue
             if a.target_word and a.target_word in line_text:
                 x = _word_x_in_line(line_text, a.target_word, x0, x1)
-                # strikethrough width sized to the target word
-                if is_strike:
+                # sized to the target word
+                if spans_text:
                     word_frac = len(a.target_word) / max(1, len(line_text))
                     width = max(15.0, word_frac * (x1 - x0))
                     # re-center start at left edge of word
                     x = x - width / 2
+            elif a.target_word:
+                # Named a word that is not on this line, so we cannot say WHICH words
+                # are wrong. Marking the whole line instead is how correct sentences
+                # end up cancelled.
+                continue
             else:
                 x = (x0 + x1) / 2
-                if is_strike:
+                if spans_text:
                     width = x1 - x0
                     x = x0
         else:
             x = a.x_fraction * cw
             y = a.y_fraction * rect.height
-            width = max(20.0, a.width_fraction * cw) if is_strike else None
+            width = max(20.0, a.width_fraction * cw) if spans_text else None
+
+        if spans_text and width is not None:
+            width = min(width, _STRIKE_MAX_FRACTION * cw)
 
         seed = f"a{a.page}{a.target_word or ''}{x:.1f}{y:.1f}"
         if a.type == "cross":
             size = 11 + _wobble(seed, 0, amp=2.5)
             _draw_cross(page, x, y, size=size, seed=seed)
-        else:  # strikethrough or circle
+        elif is_underline:
+            _draw_underline(page, x,
+                            y_under if y_under is not None else y + _UNDERLINE_DROP,
+                            width or 40.0)
+        else:
             _draw_strikethrough(page, x, y, width or 40.0)
 
 
@@ -2085,10 +2625,10 @@ def _rs_wrap_count(text: str, max_w: float, size: float, fontname: str = "helv")
 def _rs_bullet_lines(text: str, max_w: float, size: float) -> int:
     if not text or not text.strip():
         return 0
-    text = text.replace("The student", "You").replace("the student", "you")
+    text = _personalize(text)
     total = 0
-    for s in (s.strip() for s in text.split('.') if s.strip()):
-        if not s.endswith(('?', '!')):
+    for s in _split_remark_sentences(text):
+        if not s.endswith(('.', '?', '!', ']')):
             s += '.'
         total += max(1, _rs_wrap_count(s, max_w - 20, size))
     return total
@@ -2123,20 +2663,41 @@ def _draw_report_strip(page: fitz.Page, x0: float, y0: float, W: float, report: 
     page.insert_text((x0 + (W - tw) / 2, y0 + _RS_PAD + _RS_BANNER_H * 0.68), "EVALUATED",
                      fontsize=24, color=RED, fontname="hebo")
     ty = y0 + _RS_PAD + _RS_BANNER_H + 8 + _RS_TOTAL_SIZE
-    page.insert_text((x0 + _RS_PAD, ty), f"Total Score: {report.total_score} / {report.max_total}",
+    # No teacher writes "16.0 out of 20.0". The trailing .0 is a float artefact and
+    # it is the first thing a reader notices about a machine-marked sheet.
+    page.insert_text((x0 + _RS_PAD, ty),
+                     f"Total Score: {_fmt_mark(report.total_score)} / "
+                     f"{_fmt_mark(report.max_total)}",
                      fontsize=_RS_TOTAL_SIZE, color=RED, fontname="hebo")
     by = ty + 14   # body (columns) start y
 
     # Column 1 — Remarks
     page.insert_text((xs[0], by), "Remarks:", fontsize=_RS_HEAD_SIZE, color=BLACK, fontname="hebo")
-    _draw_bulleted_remarks(page, xs[0], by + _RS_LINE, report.overall_remarks,
+    _draw_bulleted_remarks(page, xs[0], by + _RS_LINE,
+                           _sanitize_for_pdf(report.overall_remarks),
                            size=_RS_BODY_SIZE, color=BLACK, max_width=col_w)
 
     # Column 2 — Question-wise Totals
     page.insert_text((xs[1], by), "Question-wise Totals:", fontsize=_RS_HEAD_SIZE, color=BLACK, fontname="hebo")
     yy = by + _RS_LINE
+    # Name the sections when the paper has both. Otherwise "Q1: 2/2" (an MCQ) sits
+    # directly above "Q1a: 1/5" (a different question in another part) with nothing
+    # to say they are not the same question's parts.
+    kinds = {bool(sec.get("objective")) for sec in report.section_totals}
+    label_sections = len(kinds) > 1
+    shown_kind = None
     for sec in report.section_totals:
-        page.insert_text((xs[1], yy), f"{sec.get('qid', '?')}: {sec.get('score', 0)} / {sec.get('max_score', 0)}",
+        kind = bool(sec.get("objective"))
+        if label_sections and kind != shown_kind:
+            page.insert_text((xs[1], yy),
+                             "Objective" if kind else "Descriptive",
+                             fontsize=_RS_HEAD_SIZE - 1, color=(0.42, 0.42, 0.42),
+                             fontname="hebo")
+            yy += _RS_LINE
+            shown_kind = kind
+        page.insert_text((xs[1], yy),
+                         f"{sec.get('qid', '?')}: {_fmt_mark(sec.get('score', 0))} / "
+                         f"{_fmt_mark(sec.get('max_score', 0))}",
                          fontsize=_RS_BODY_SIZE, color=RED, fontname="hebo")
         yy += _RS_LINE
 
@@ -2146,42 +2707,88 @@ def _draw_report_strip(page: fitz.Page, x0: float, y0: float, W: float, report: 
         page.insert_text((xs[2], by), "Where marks were lost:", fontsize=_RS_HEAD_SIZE, color=RED, fontname="hebo")
         yy = by + _RS_LINE
         for q in lost:
-            yy = _draw_text(page, xs[2], yy, f"{q.qid}: {q.remark}", size=_RS_BODY_SIZE,
+            yy = _draw_text(page, xs[2], yy,
+                            _sanitize_for_pdf(f"{q.qid}: {q.remark}"),
+                            size=_RS_BODY_SIZE,
                             color=RED, fontname="helv", max_width=col_w)
 
 
 def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
                         student_pngs: list[bytes], report: GradeReport,
-                        ocr_pages: list[PageOCR] | None = None) -> bytes:
+                        ocr_pages: list[PageOCR] | None = None,
+                        mark_scale: float = 1.0,
+                        safe_layout: bool = False) -> bytes:
     """Build the evaluated PDF and return its bytes.
 
     If the student submission was a PDF, we annotate the original pages directly.
     Otherwise we build PDF pages from the student PNGs.
+
+    mark_scale shrinks (or grows) the inline ticks, crosses and circled marks —
+    CA/commerce sheets are dense and small-handwritten, so they need smaller marks
+    than a school sheet for the working to stay readable underneath.
     """
+    token = _MARK_SCALE.set(max(0.3, min(2.0, float(mark_scale or 1.0))))
+    layout_token = _SAFE_LAYOUT.set(bool(safe_layout))
+    try:
+        # The renderer keeps per-document registries in module-level dicts (content
+        # widths, strip cursors, ink/remark bands) and clears one of them wholesale at
+        # the start of a build. Two concurrent builds — two server jobs, or a parallel
+        # evaluation run — would corrupt each other's geometry, so builds are serialized.
+        # Rendering is cheap next to the model calls, so this costs nothing noticeable.
+        with _RENDER_LOCK:
+            return _build_evaluated_pdf(student_pdf_bytes, student_filename,
+                                        student_pngs, report, ocr_pages)
+    finally:
+        _SAFE_LAYOUT.reset(layout_token)
+        _MARK_SCALE.reset(token)
+
+
+def _build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
+                         student_pngs: list[bytes], report: GradeReport,
+                         ocr_pages: list[PageOCR] | None = None) -> bytes:
     # Recompute total AND max from per-question scores so the cover page never
     # disagrees with the question-wise breakdown. Also rebuild section_totals
     # from the same source of truth. (The model sometimes drops not-attempted
     # questions from max_total while still listing them at 0/max — recomputing
     # the denominator here keeps the percentage honest.)
     report.total_score = round(sum(q.score for q in report.questions), 2)
-    report.max_total = round(sum(q.max_score for q in report.questions), 2)
+    # ...but NOT on a paper with internal choice. There the counted script leaves out
+    # the alternatives the student did not take, so the drawn rows sum to less than
+    # the paper: skipping one of the two required alternatives on the Corporate Laws
+    # master test made a 50-mark paper come out "of 40", which is not a smaller paper,
+    # it is ten marks the student lost. The denominator was bound to the official
+    # total upstream by the strict reconcile; leave it alone.
+    if not list(getattr(report, "choice_candidate_qids", None) or []):
+        report.max_total = round(sum(q.max_score for q in report.questions), 2)
     # Rebuild section_totals keyed by the top-level question (Q1, Q2, ...)
     sec_acc: dict[str, dict] = {}
     for q in report.questions:
         top = q.qid.split(".")[0].split("(")[0].strip() or q.qid
-        bucket = sec_acc.setdefault(top, {"qid": top, "score": 0.0, "max_score": 0.0})
+        bucket = sec_acc.setdefault(top, {"qid": top, "score": 0.0, "max_score": 0.0,
+                                          "objective": True})
         bucket["score"] += q.score
         bucket["max_score"] += q.max_score
+        bucket["objective"] = bucket["objective"] and bool(
+            getattr(q, "objective", False)
+            or str(getattr(q, "correct_option", "") or "").strip()
+            or str(getattr(q, "chosen_option", "") or "").strip())
     if sec_acc:
-        # preserve numeric ordering when qids look like "Q12"
+        # Paper order, objective section first. A CA paper numbers BOTH parts from 1 -
+        # Part I is MCQ Q1..Q8 and Part II is Q1(a)..Q4(b) - so ordering on the number
+        # alone left every sub-part tied with its MCQ namesake, and Python's stable
+        # sort then kept the grader's own order. The cover read "Q1, Q1b, Q1a, Q1c,
+        # Q2, Q3, Q3a": two different Q1s adjacent and the sub-parts shuffled.
         def sec_key(d):
             qid = d["qid"]
             digits = "".join(ch for ch in qid if ch.isdigit())
-            return int(digits) if digits else 9999
+            suffix = "".join(ch for ch in qid if ch.isalpha()).lower().lstrip("q")
+            return (0 if d.get("objective") else 1,
+                    int(digits) if digits else 9999, suffix)
         report.section_totals = [
             {"qid": d["qid"],
              "score": round(d["score"], 2),
-             "max_score": round(d["max_score"], 2)}
+             "max_score": round(d["max_score"], 2),
+             "objective": bool(d.get("objective"))}
             for d in sorted(sec_acc.values(), key=sec_key)
         ]
 
@@ -2205,6 +2812,13 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
     # content width so OCR coords still map onto the writing); the strip carries
     # all ticks/scores/remarks so they never sit on the writing or run off-page.
     _CONTENT_W.clear()
+    _UNANCHORED.clear()
+    # Cleared wholesale, not by id: the pages marks are placed on belong to the
+    # `widened` document built just below, and a freed id() is handed straight back
+    # out by CPython — so keying the reset on any one document let the NEXT sheet
+    # inherit this one's ink masks and place its marks against the wrong page.
+    # Safe because _RENDER_LOCK serialises builds, exactly as for _CONTENT_W.
+    _MARK_INK.clear()
     widened = fitz.open()
     for pno in range(len(student_doc)):
         src = student_doc[pno]
@@ -2212,10 +2826,9 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
         strip = max(STRIP_MIN_WIDTH, w * STRIP_FRACTION)
         npage = widened.new_page(width=w + strip, height=h)
         npage.show_pdf_page(fitz.Rect(0, 0, w, h), student_doc, pno)
-        # Divider line + a small header at the top of the strip.
+        # Divider line only — a printed "MARKS / REMARKS" header on every page
+        # made the sheet look machine-annotated. Teachers just rule a margin.
         npage.draw_line(fitz.Point(w, 0), fitz.Point(w, h), color=RED, width=1.0)
-        npage.insert_text((w + 12, 24), "MARKS / REMARKS", fontsize=8.5,
-                          color=RED, fontname="hebo")
         _CONTENT_W[(id(widened), pno + 1)] = w
     student_doc.close()
     student_doc = widened
@@ -2231,26 +2844,28 @@ def build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
 
     line_index = _build_line_index(ocr_pages)
 
-    # Fresh remark-band registry for this document so notes don't overlap.
-    _reset_remark_bands(student_doc)
-
-    # Pre-scan each page image for real ink so remarks avoid handwriting /
-    # scribbles / crossed-out tables that the OCR never returned as text lines.
-    _INK_BANDS[id(student_doc)] = {}
-    for i in range(len(student_doc)):
-        if i < len(student_pngs):
-            _INK_BANDS[id(student_doc)][i + 1] = _ink_intervals_from_png(
-                student_pngs[i], student_doc[i].rect.height)
-
     # Question marks first — this can draw across page boundaries, so it must
     # see the whole document, not one page at a time.
     _annotate_questions(student_doc, report.questions, line_index)
+    # Steps that found no line on the student's writing were drawn nowhere. Hand
+    # that back so the release path can re-mark the question instead of shipping a
+    # score the page cannot account for.
+    try:
+        report.unanchored_step_qids = sorted(_UNANCHORED)
+    except (AttributeError, ValueError):
+        pass
 
-    # Inline annotations (crosses, strikethroughs) stay per-page.
-    for i, page in enumerate(student_doc, start=1):
-        anns = ann_by_page.get(i, [])
-        if anns:
-            _draw_inline_annotations(page, anns, line_index=line_index)
+    # Inline annotations (crosses, strikethroughs) stay per-page. Lines that earned
+    # their step marks are off limits to a strike — see _draw_inline_annotations.
+    earned_line_ids = {c.step_line_id for q in report.questions
+                       for c in (getattr(q, "criteria", None) or [])
+                       if getattr(c, "met", False) and getattr(c, "step_line_id", None)}
+    if not _SAFE_LAYOUT.get():
+        for i, page in enumerate(student_doc, start=1):
+            anns = ann_by_page.get(i, [])
+            if anns:
+                _draw_inline_annotations(page, anns, line_index=line_index,
+                                         earned_line_ids=earned_line_ids)
 
     # First page gets the report as a wide LANDSCAPE strip across the TOP (same width as the
     # sheet), replacing the old standalone cover + summary pages. The already-annotated first
