@@ -41,6 +41,15 @@ client_config.json
 token.txt
 /build_log.txt
 
+# Faculty/review runs: report.json and ocr.json carry the student's transcribed
+# handwriting and their marks, which is the answer sheet in another format. The
+# *.pdf / *.png rules above miss them because they are JSON.
+/ca_corporate_law_review/
+/ca_fm_sm_review/
+/ca_taxation_review/
+/faculty_review_v5/
+/physics_review_*/
+
 # Generated accuracy/benchmark runs (inputs may contain student PII)
 /ab_fanout*/
 /ab_scheme/
