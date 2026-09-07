@@ -144,6 +144,53 @@ check("a non-PDF upload is left alone",
 check("corrupt bytes never lose the copy",
       split_two_page_spreads(b"%PDF-broken", "student.pdf") == (b"%PDF-broken", False))
 
+
+print()
+print("== one booklet is photographed one way, so its pages rotate one way ==")
+# MEASURED on a real Class 10 Physics booklet (3 pages, all photographed sideways):
+# the free heuristic returned 90, 0, 90. Page 2 alone would have been left sideways,
+# and the rebuilt PDF would then hold two different page geometries - worse than
+# leaving all three untouched, because the renderer and OCR both assume one.
+# Page 2's own profile is decisive and wrong (banding +0.303 towards 0 degrees when
+# 90 is upright), and cropping to the ink makes it MORE confident, not less. The
+# reliable signal is not in the page, it is in the batch.
+from orient import _agree_across_pages  # noqa: E402
+
+check("the odd page out is brought into line", _agree_across_pages([90, 0, 90]) == [90, 90, 90],
+      f"{_agree_across_pages([90, 0, 90])}")
+check("a booklet already agreeing is untouched",
+      _agree_across_pages([90, 90, 90]) == [90, 90, 90])
+check("an upright booklet stays upright", _agree_across_pages([0, 0, 0]) == [0, 0, 0])
+
+# Conservative on purpose: a booklet that genuinely disagrees is left alone rather
+# than forced, because forcing it would rotate pages that were right to begin with.
+check("no strict majority means no change", _agree_across_pages([90, 0, 0]) == [90, 0, 0],
+      f"{_agree_across_pages([90, 0, 0])}")
+check("an even split is left alone", _agree_across_pages([90, 90, 0, 0]) == [90, 90, 0, 0],
+      f"{_agree_across_pages([90, 90, 0, 0])}")
+check("two different rotations never merge",
+      _agree_across_pages([90, 270, 90, 270]) == [90, 270, 90, 270],
+      f"{_agree_across_pages([90, 270, 90, 270])}")
+check("a single page is never second-guessed", _agree_across_pages([90]) == [90])
+check("two pages are too few to vote", _agree_across_pages([90, 0]) == [90, 0],
+      f"{_agree_across_pages([90, 0])}")
+
+# End to end: three sideways pages must come back as three upright pages of ONE size.
+sideways = fitz.open()
+for i in range(3):
+    pg = sideways.new_page(width=842, height=595)          # landscape
+    for row in range(14):                                   # ruled lines + writing
+        y = 60 + row * 34
+        pg.draw_line(fitz.Point(40, y), fitz.Point(800, y), color=(0.7, 0.75, 0.9), width=0.8)
+        pg.insert_text((60, y - 6), "R = R1 + R2 = 20 + 4 = 24 ohm", fontsize=13,
+                       color=(0.1, 0.1, 0.4))
+book = sideways.tobytes()
+sideways.close()
+out, rots, changed = normalize_orientation(book, "booklet.pdf")
+sizes = {(round(p.rect.width), round(p.rect.height)) for p in fitz.open(stream=out, filetype="pdf")}
+check("every page of a booklet ends up the same shape", len(sizes) == 1,
+      f"rotations={rots}, page sizes={sizes}")
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)} -> {FAILS}")

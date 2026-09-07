@@ -147,6 +147,44 @@ def _jpeg_upright(page_png: bytes, angle: int) -> bytes:
     return buf.getvalue()
 
 
+def _agree_across_pages(rots: list[int]) -> list[int]:
+    """Make the free heuristic's per-page answers agree, when most of them already do.
+
+    The pages of one upload were photographed in one sitting and the same way round,
+    so a single page disagreeing with the rest is the detector failing on that page,
+    not a genuinely crooked booklet. MEASURED on a Class 10 Physics booklet whose
+    three pages are all sideways: the heuristic said 90, 0, 90, so page 2 alone would
+    have been left sideways - and worse than untouched, because the PDF would then
+    hold two different page geometries. Its own profile is decisive and wrong:
+
+        0 deg   cv(rows)=1.308  cv(cols)=1.005  banding=+0.303   <- chosen
+        90 deg  cv(rows)=1.005  cv(cols)=1.308  banding=-0.303   <- actually upright
+
+    Nothing cheap distinguishes those. Cropping to the ink first makes page 2 MORE
+    confident in the wrong answer, not less. That is the same weakness this module
+    already documents ("telling upright from a full 180-degree flip from pixels alone
+    is inherently weak", and a released copy once had two upright ruled pages rotated
+    270 and 180). The reliable signal is not in the page, it is in the batch.
+
+    Deliberately conservative. It needs a STRICT majority of all pages and a single
+    winning angle, so a two-page booklet reading 90 and 270, or a four-page one split
+    two-two, is left exactly as it was.
+    """
+    if len(rots) < 3:
+        return rots
+    votes: dict[int, int] = {}
+    for r in rots:
+        if r:
+            votes[r] = votes.get(r, 0) + 1
+    if not votes:
+        return rots
+    top = max(votes.values())
+    winners = [a for a, c in votes.items() if c == top]
+    if len(winners) != 1 or top <= len(rots) - top:
+        return rots
+    return [winners[0]] * len(rots)
+
+
 def _clean_rotations(values, n: int) -> list[int]:
     out = []
     for v in (values or []):
@@ -188,9 +226,13 @@ def normalize_orientation(data: bytes, filename: str, rotations=None,
         try:
             rots = _clean_rotations(probe(page_pngs), n)
         except Exception:
-            rots = [detect_rotation(Image.open(BytesIO(p))) for p in page_pngs]
+            # The probe looked at every page and is per-page authority; the free
+            # heuristic replacing it is not, so its answers are reconciled.
+            rots = _agree_across_pages(
+                [detect_rotation(Image.open(BytesIO(p))) for p in page_pngs])
     else:
-        rots = [detect_rotation(Image.open(BytesIO(p))) for p in page_pngs]
+        rots = _agree_across_pages(
+            [detect_rotation(Image.open(BytesIO(p))) for p in page_pngs])
 
     if not any(rots):
         if is_pdf:
