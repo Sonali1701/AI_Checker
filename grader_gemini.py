@@ -1,239 +1,467 @@
-"""Gemini-backed grader. Mirrors grader.py's public interface so app.py can swap providers."""
+"""Gemini grading calls routed exclusively through the PW shared proxy."""
 from __future__ import annotations
 
+import base64
+import json
 import os
+import re
 
-from google import genai
-from google.genai import types
-
-# Reuse the Pydantic schema + system prompts from the Claude grader so both backends
-# produce structurally-identical GradeReport objects.
+import pw_access
+from costs import record_usage_event
 from grader import (
+    AUDIT_SYSTEM_PROMPT,
+    AuditItem,
+    AuditSheet,
     GradeReport,
     MarksScheme,
-    MARKS_SCHEME_PROMPT,
-    RUBRIC_GEN_PROMPT,
+    NO_QUESTION_PAPER_BLOCK,
+    OutputLimitExceeded,
+    ObjectiveChoiceObservation,
+    ObjectiveChoiceSheet,
+    REPAIR_SYSTEM_PROMPT,
+    RepairItem,
+    RepairSheet,
+    audit_response_schema,
+    build_audit_prompt,
+    build_marks_scheme_prompt,
+    build_repair_prompt,
+    parse_audit,
+    paper_text_block,
+    parse_marks_scheme,
+    parse_repair,
+    parse_strict_marks_scheme,
     _downscale_for_model,
     _reconcile_report,
+    build_rubric_prompt,
+    compress_page_for_model,
     build_system_prompt,
     exam_context_block,
     marks_scheme_block,
+    parse_grade_report,
+    scheme_matches_total,
 )
 from mathpix import PageOCR, overlay_anchors_on_png
 
-DEFAULT_MODEL = "gemini-2.0-flash-exp"
-
-# --- Cost & consistency controls for the grading call ------------------------------
-# On Gemini 2.5 the billed "output" is mostly the model's INTERNAL THINKING tokens, and
-# at Pro's $10/1M that is ~80-90% of the per-sheet cost. Cap it: GEMINI_THINKING_BUDGET
-# bounds thinking tokens (still leaves plenty of reasoning), which is the single biggest
-# lever on Pro cost. SEED makes greedy decoding more reproducible run-to-run.
-#   - Raise the budget if you see grading quality/consistency drop on hard papers.
-#   - Lower it (e.g. 2048) to save more. Set 0 to disable the cap (full dynamic thinking).
+DEFAULT_MODEL = "gemini-2.5-flash"
 _THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "4096"))
 _SEED = int(os.environ.get("GEMINI_SEED", "42"))
 
 
-def _thinking_config(budget: int | None = None):
-    """A ThinkingConfig that caps thinking tokens, or None when disabled / unsupported by
-    the installed SDK (so the code is safe on any google-genai version). `budget` overrides
-    the GEMINI_THINKING_BUDGET default for one call (e.g. give Flash a bigger budget than Pro)."""
-    b = _THINKING_BUDGET if budget is None else int(budget)
-    if b <= 0:
-        return None
-    try:
-        if "thinking_budget" in types.ThinkingConfig.model_fields:
-            return types.ThinkingConfig(thinking_budget=b)
-    except Exception:
-        pass
-    return None
+def _text_part(text: str) -> dict:
+    return {"text": text}
 
 
-def _no_thinking_config():
-    """ThinkingConfig that DISABLES thinking (budget 0), or None if unsupported. The
-    orientation probe is a pure perception task that needs no reasoning, and on 2.5 Flash
-    the default dynamic thinking would otherwise consume the tiny output budget and TRUNCATE
-    the JSON array (the [90, 90 cut-off we saw)."""
-    try:
-        if "thinking_budget" in types.ThinkingConfig.model_fields:
-            return types.ThinkingConfig(thinking_budget=0)
-    except Exception:
-        pass
-    return None
+def _image_part(image_bytes: bytes, mime_type: str = "image/png") -> dict:
+    return {
+        "inlineData": {
+            "mimeType": mime_type,
+            "data": base64.standard_b64encode(image_bytes).decode("ascii"),
+        }
+    }
 
 
-def _make_client(api_key: str | None, use_vertex: bool,
-                 project: str | None = None, location: str | None = None) -> genai.Client:
-    """Three modes:
-    1. Developer API (default): vertexai=False, api_key required
-    2. Vertex AI Express: vertexai=True, api_key required (key starts with 'AQ.')
-    3. Vertex AI with ADC: vertexai=True, project+location, no api_key
-    """
-    if use_vertex:
-        key = api_key or os.environ.get("GOOGLE_API_KEY")
-        if key:
-            # Vertex Express Mode — API key auth, no project/location needed
-            return genai.Client(vertexai=True, api_key=key)
-        # ADC mode — needs project + location
-        return genai.Client(
-            vertexai=True,
-            project=project or os.environ.get("GOOGLE_CLOUD_PROJECT"),
-            location=location or os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+def _request(
+    parts: list[dict],
+    *,
+    system_instruction: str = "",
+    max_output_tokens: int,
+    response_schema: type | dict | None = None,
+    thinking_budget: int | None = None,
+) -> dict:
+    generation_config: dict = {
+        "temperature": 0,
+        "maxOutputTokens": max_output_tokens,
+    }
+    if response_schema is not None:
+        generation_config.update(
+            {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": (
+                    response_schema if isinstance(response_schema, dict)
+                    else response_schema.model_json_schema()
+                ),
+            }
         )
-    return genai.Client(api_key=api_key or os.environ.get("GOOGLE_API_KEY"))
+    if thinking_budget is not None:
+        generation_config["thinkingConfig"] = {
+            "thinkingBudget": max(0, int(thinking_budget))
+        }
+    request = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": generation_config,
+    }
+    if system_instruction:
+        request["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    return request
 
 
-def _image_part(png_bytes: bytes) -> types.Part:
-    return types.Part.from_bytes(data=png_bytes, mime_type="image/png")
+def _response_text(response: dict) -> str:
+    try:
+        parts = response["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError) as exc:
+        # Surface what actually came back (block reason, error body, finish reason)
+        # instead of a blind "no output" — essential for diagnosing proxy issues.
+        detail = ""
+        if isinstance(response, dict):
+            feedback = response.get("promptFeedback") or response.get("prompt_feedback")
+            err = response.get("error")
+            finish = _finish_reason(response)
+            bits = [
+                f"blockReason={feedback.get('blockReason')}" if isinstance(feedback, dict) and feedback.get("blockReason") else "",
+                f"finishReason={finish}" if finish else "",
+                f"error={err}" if err else "",
+            ]
+            detail = "; ".join(b for b in bits if b) or f"response snippet: {str(response)[:400]}"
+        raise RuntimeError(f"Gemini returned no model output ({detail}).") from exc
+    return "".join(str(part.get("text") or "") for part in parts).strip()
 
 
-def _text_part(text: str) -> types.Part:
-    return types.Part.from_text(text=text)
+def _finish_reason(response: dict) -> str:
+    try:
+        candidate = response["candidates"][0]
+        return str(candidate.get("finishReason") or candidate.get("finish_reason") or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _usage(response: dict, model: str) -> dict:
+    meta = response.get("usageMetadata") or response.get("usage_metadata") or {}
+
+    def value(camel: str, snake: str) -> int:
+        return int(meta.get(camel) or meta.get(snake) or 0)
+
+    prompt = value("promptTokenCount", "prompt_token_count")
+    cached = value("cachedContentTokenCount", "cached_content_token_count")
+    candidates = value("candidatesTokenCount", "candidates_token_count")
+    thoughts = value("thoughtsTokenCount", "thoughts_token_count")
+    return {
+        "provider": "gemini",
+        "model": model,
+        "input_tokens": max(0, prompt - cached),
+        "cached_input_tokens": cached,
+        "cache_write_tokens": 0,
+        "output_tokens": candidates + thoughts,
+    }
+
+
+def _generate(
+    google_token: str,
+    *,
+    model: str,
+    request: dict,
+    filename: str,
+    count: int,
+    task_id: str,
+) -> dict:
+    if not google_token or not task_id:
+        raise PermissionError("A signed-in PW user and task_id are required.")
+    return pw_access.gemini_generate(
+        google_token,
+        model=model,
+        request=request,
+        filename=filename,
+        input_unit="No. of pages",
+        count=count,
+        task_id=task_id,
+    )
 
 
 def orientation_probe(
     page_pngs: list[bytes],
     model: str = "gemini-2.5-flash",
-    api_key: str | None = None,
-    use_vertex: bool = False,
-    project: str | None = None,
-    location: str | None = None,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
     debug: dict | None = None,
+    usage_out: dict | None = None,
 ) -> list[int]:
-    """Ask a cheap Flash call, in ONE batched request, how to straighten each page.
-
-    Returns the counter-clockwise angle (0/90/180/270) to apply to each page so the
-    writing is upright — same convention as orient.detect_rotation / PIL Image.rotate.
-    Never raises: on any failure it returns all-zeros (leave pages as-is). When `debug` is
-    given it's filled with the model's raw reply / any error, for log-based diagnosis."""
-    import json
-    import re
-
+    """Return the CCW rotation for each page; degrade to no rotation on failure."""
     if not page_pngs:
         return []
     raw = ""
     err = ""
     out: list[int] = []
     try:
-        client = _make_client(api_key, use_vertex, project, location)
-        # Vision models READ rotated text without trouble, so a vague "is this upright?"
-        # gets a lazy "yes". Force a concrete judgement off the geometry of the writing.
         parts = [_text_part(
             "Each image is one page of a HANDWRITTEN exam. Some pages were photographed "
             "SIDEWAYS or upside-down. For EACH image, in order, output the COUNTER-CLOCKWISE "
             "rotation (0, 90, 180, or 270 degrees) that makes the handwriting upright.\n"
             "Judge from the GEOMETRY of the writing, not from whether you can read it. Look at "
             "which way the TOPS of the letters point:\n"
-            "- Lines run left-to-right, letter-tops point UP (already upright) → 0\n"
-            "- Writing runs top-to-bottom, letter-tops point RIGHT → 90\n"
-            "- Writing is upside-down, letter-tops point DOWN → 180\n"
-            "- Writing runs bottom-to-top, letter-tops point LEFT → 270\n"
-            "A page photographed in landscape (wider than tall) is almost always 90 or 270, "
-            "NOT 0. Reply with ONLY a JSON array of these integers, one per image, in order, "
-            "e.g. [90, 270, 0]."
+            "- Lines run left-to-right, letter-tops point UP (already upright) -> 0\n"
+            "- Writing runs top-to-bottom, letter-tops point RIGHT -> 90\n"
+            "- Writing is upside-down, letter-tops point DOWN -> 180\n"
+            "- Writing runs bottom-to-top, letter-tops point LEFT -> 270\n"
+            "Reply with ONLY a JSON array, one integer per image, e.g. [90, 270, 0]."
         )]
-        for p in page_pngs:
-            parts.append(_image_part(_downscale_for_model(p, max_edge=900)))
-        # Disable thinking (perception task) AND give a generous output cap, so the JSON
-        # array can't be truncated by reasoning tokens the way [90, 90 was.
-        cfg_kwargs = dict(temperature=0, max_output_tokens=2000)
-        _ntc = _no_thinking_config()
-        if _ntc is not None:
-            cfg_kwargs["thinking_config"] = _ntc
-        resp = client.models.generate_content(
+        parts.extend(_image_part(_downscale_for_model(p, max_edge=900)) for p in page_pngs)
+        response = _generate(
+            google_token,
             model=model,
-            contents=[types.Content(role="user", parts=parts)],
-            config=types.GenerateContentConfig(**cfg_kwargs),
+            request=_request(parts, max_output_tokens=2000, thinking_budget=0),
+            filename=filename,
+            count=len(page_pngs),
+            task_id=task_id,
         )
-        raw = (resp.text or "").strip()
-        # Tolerate a truncated array (no closing ]) — pull the integers in order either way.
-        m = re.search(r"\[[^\]]*\]", raw) or re.search(r"\[[^\]]*$", raw)
-        segment = m.group(0) if m else raw
-        for v in re.findall(r"-?\d+", segment):
-            try:
-                iv = int(v) % 360
-            except (TypeError, ValueError):
-                iv = 0
-            out.append(iv if iv in (0, 90, 180, 270) else 0)
-    except Exception as e:  # noqa: BLE001
-        err = f"{type(e).__name__}: {e}"
+        record_usage_event(usage_out, _usage(response, model), stage="orientation")
+        raw = _response_text(response)
+        match = re.search(r"\[[^\]]*\]", raw) or re.search(r"\[[^\]]*$", raw)
+        segment = match.group(0) if match else raw
+        for value in re.findall(r"-?\d+", segment):
+            angle = int(value) % 360
+            out.append(angle if angle in (0, 90, 180, 270) else 0)
+    except Exception as exc:  # orientation must never block grading
+        err = f"{type(exc).__name__}: {exc}"
     if debug is not None:
-        debug["raw"] = raw[:200]
-        debug["error"] = err
-        debug["model"] = model
+        debug.update({"raw": raw[:200], "error": err, "model": model})
     return (out + [0] * len(page_pngs))[: len(page_pngs)]
 
 
 def generate_rubric(
     question_paper_pngs: list[bytes],
     model: str = DEFAULT_MODEL,
-    api_key: str | None = None,
-    use_vertex: bool = False,
-    project: str | None = None,
-    location: str | None = None,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
     student_class: str | None = None,
     subject: str | None = None,
+    exam_type: str | None = None,
 ) -> str:
-    client = _make_client(api_key, use_vertex, project, location)
-
-    parts: list[types.Part] = []
-    ctx = exam_context_block(student_class, subject)
-    if ctx:
-        parts.append(_text_part(ctx))
+    parts: list[dict] = []
+    context = exam_context_block(student_class, subject, exam_type)
+    if context:
+        parts.append(_text_part(context))
     parts.append(_text_part("Question paper:"))
-    for png in question_paper_pngs:
-        parts.append(_image_part(png))
+    parts.extend(_image_part(png) for png in question_paper_pngs)
     parts.append(_text_part("Produce the marking rubric for this paper as described in the system instruction."))
-
-    resp = client.models.generate_content(
+    response = _generate(
+        google_token,
         model=model,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            system_instruction=RUBRIC_GEN_PROMPT,
-            temperature=0,
-            max_output_tokens=8000,
+        request=_request(
+            parts,
+            system_instruction=build_rubric_prompt(subject, student_class, exam_type),
+            max_output_tokens=16000,
+            thinking_budget=1024,
         ),
+        filename=filename,
+        count=len(question_paper_pngs),
+        task_id=task_id,
     )
-    return resp.text
+    return _response_text(response)
 
 
 def extract_marks_scheme(
     question_paper_pngs: list[bytes],
     model: str = DEFAULT_MODEL,
-    api_key: str | None = None,
-    use_vertex: bool = False,
-    project: str | None = None,
-    location: str | None = None,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
     student_class: str | None = None,
     subject: str | None = None,
+    exam_type: str | None = None,
+    total_marks: float | None = None,
+    paper_text: str = "",
+    require_complete: bool = False,
 ) -> MarksScheme:
-    """Read the authoritative per-part maximum-marks scheme off the question paper."""
-    client = _make_client(api_key, use_vertex, project, location)
-
-    parts: list[types.Part] = []
-    ctx = exam_context_block(student_class, subject)
-    if ctx:
-        parts.append(_text_part(ctx))
+    parts: list[dict] = []
+    context = exam_context_block(student_class, subject, exam_type, total_marks)
+    if context:
+        parts.append(_text_part(context))
+    block = paper_text_block(paper_text)
+    if block:
+        parts.append(_text_part(block))
     parts.append(_text_part("Question paper:"))
-    for png in question_paper_pngs:
-        parts.append(_image_part(png))
+    parts.extend(_image_part(png) for png in question_paper_pngs)
     parts.append(_text_part("Extract the official maximum-marks scheme as described."))
-
-    resp = client.models.generate_content(
+    # 2.5-pro always spends thinking tokens and they count against maxOutputTokens —
+    # cap thinking and leave real headroom, or the visible answer comes back empty.
+    response = _generate(
+        google_token,
         model=model,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            system_instruction=MARKS_SCHEME_PROMPT,
-            temperature=0,
-            response_mime_type="application/json",
+        request=_request(
+            parts,
+            system_instruction=build_marks_scheme_prompt(subject, student_class, exam_type),
+            max_output_tokens=16000,
             response_schema=MarksScheme,
-            max_output_tokens=8000,
+            thinking_budget=1024,
         ),
+        filename=filename,
+        count=len(question_paper_pngs),
+        task_id=task_id,
     )
-    parsed = getattr(resp, "parsed", None)
-    if not isinstance(parsed, MarksScheme):
-        parsed = MarksScheme.model_validate_json(resp.text)
-    return parsed
+    raw = _response_text(response)
+    if require_complete:
+        if _finish_reason(response).strip().upper() != "STOP":
+            raise OutputLimitExceeded(
+                "Gemini did not finish the marks graph cleanly; it cannot be attested.")
+        try:
+            return parse_strict_marks_scheme(raw)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Gemini's marks graph was not complete strict JSON.") from exc
+    return parse_marks_scheme(raw)
+
+
+def repair_report_totals(
+    report: GradeReport,
+    model: str = DEFAULT_MODEL,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
+    total_marks: float,
+    marks_scheme: MarksScheme | None = None,
+    qp_text: str = "",
+    usage_out: dict | None = None,
+) -> list[RepairItem]:
+    """Text-only follow-up that corrects a report's per-question maxima to the
+    official paper total. Cheap: no images, small output."""
+    prompt = build_repair_prompt(report, total_marks, marks_scheme, qp_text)
+    response = _generate(
+        google_token,
+        model=model,
+        request=_request(
+            [_text_part(prompt)],
+            system_instruction=REPAIR_SYSTEM_PROMPT,
+            max_output_tokens=8000,
+            response_schema=RepairSheet,
+            thinking_budget=2048,
+        ),
+        filename=filename,
+        count=1,
+        task_id=task_id,
+    )
+    record_usage_event(usage_out, _usage(response, model), stage="repair")
+    return parse_repair(_response_text(response))
+
+
+def audit_deductions(
+    report: GradeReport,
+    model: str = DEFAULT_MODEL,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
+    answer_key_text: str = "",
+    ocr_transcript: str = "",
+    question_paper_text: str = "",
+    student_evidence_pngs: list[bytes] | None = None,
+    usage_out: dict | None = None,
+    include_awards: bool = False,
+    selected_qids: set[str] | None = None,
+    max_output_tokens: int = 32000,
+    repair_rows: dict[int, str] | None = None,
+) -> list[AuditItem]:
+    """Text-only second-examiner pass over the deductions (see AUDIT_SYSTEM_PROMPT)."""
+    prompt = build_audit_prompt(report, answer_key_text, ocr_transcript,
+                                question_paper_text=question_paper_text,
+                                include_awards=include_awards,
+                                selected_qids=selected_qids,
+                                repair_rows=repair_rows)
+    parts: list[dict] = [_text_part(prompt)]
+    if student_evidence_pngs:
+        parts.append(_text_part(
+            "=== STUDENT ANSWER PAGE IMAGE(S) ===\n"
+            "Inspect the live handwriting as well as the transcript. The image "
+            "decides whether text is crossed out and whether an example is present."
+        ))
+        parts.extend(_image_part(png) for png in student_evidence_pngs)
+    response = _generate(
+        google_token,
+        model=model,
+        request=_request(
+            parts,
+            system_instruction=AUDIT_SYSTEM_PROMPT,
+            # Thinking is billed against this cap and cannot be limited (the proxy
+            # strips thinkingConfig), so leave room or the JSON comes back truncated.
+            max_output_tokens=max(512, min(32000, int(max_output_tokens))),
+            response_schema=audit_response_schema(),
+            thinking_budget=2048,
+        ),
+        filename=filename,
+        count=max(1, len(student_evidence_pngs or [])),
+        task_id=task_id,
+    )
+    record_usage_event(usage_out, _usage(response, model), stage="verify")
+    return parse_audit(_response_text(response))
+
+
+def read_objective_choices(
+    student_pngs: list[bytes],
+    qids: list[str],
+    model: str = DEFAULT_MODEL,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
+    usage_out: dict | None = None,
+) -> list[ObjectiveChoiceObservation]:
+    """Independent vision-only read of active MCQ choices; never receives the key."""
+    wanted = [str(qid).strip() for qid in qids if str(qid).strip()]
+    prompt = (
+        "Read the student's FINAL ACTIVE selected option for every requested question. "
+        "Ignore an option that is crossed out or overwritten; a tick/check box beside "
+        "an option means that option was selected. Do not grade and do not infer from "
+        "subject knowledge. Return exactly one item per qid, chosen_option A-D only when "
+        "visually clear; otherwise return an empty option and clear=false. Estimate the "
+        "page and vertical fraction of the visible answer row.\nRequested qids: "
+        + ", ".join(wanted)
+    )
+    parts: list[dict] = [_text_part(prompt)]
+    parts.extend(_image_part(png) for png in student_pngs)
+    def dispatch(*, retry: bool = False) -> dict:
+        request_parts = list(parts)
+        if retry:
+            request_parts[0] = _text_part(
+                prompt
+                + "\nYour previous response was not valid JSON. Return only the schema "
+                  "object with an items array; do not add prose or markdown."
+            )
+        response = _generate(
+            google_token,
+            model=model,
+            request=_request(
+                request_parts,
+                system_instruction="You are an independent visual transcription examiner.",
+                max_output_tokens=max(1200, 160 * len(wanted)),
+                response_schema=ObjectiveChoiceSheet,
+                thinking_budget=0 if retry else 1024,
+            ),
+            filename=filename,
+            count=max(1, len(student_pngs)),
+            task_id=task_id,
+        )
+        record_usage_event(
+            usage_out, _usage(response, model),
+            stage="objective_verify_retry" if retry else "objective_verify",
+        )
+        return response
+
+    def parse(response: dict) -> list[ObjectiveChoiceObservation]:
+        raw = json.loads(_response_text(response))
+        if isinstance(raw, list):
+            raw = {"items": raw}
+        for item in list(raw.get("items") or []) if isinstance(raw, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            if "y_fraction" not in item and "vertical_fraction" in item:
+                item["y_fraction"] = item.pop("vertical_fraction")
+            if "clear" not in item:
+                item["clear"] = str(item.get("chosen_option") or "").strip().upper() in {
+                    "A", "B", "C", "D"
+                }
+        return ObjectiveChoiceSheet.model_validate(raw).items
+
+    try:
+        return parse(dispatch())
+    except (json.JSONDecodeError, ValueError):
+        # A malformed structured reply is billable but contains no trustworthy
+        # certificate. Retry once under the same job/task id; never guess or repair
+        # selected options from broken JSON.
+        return parse(dispatch(retry=True))
 
 
 def grade_answer_sheet(
@@ -244,149 +472,101 @@ def grade_answer_sheet(
     ocr_transcript: str | None = None,
     ocr_pages: list[PageOCR] | None = None,
     model: str = DEFAULT_MODEL,
-    api_key: str | None = None,
-    use_vertex: bool = False,
-    project: str | None = None,
-    location: str | None = None,
+    *,
+    google_token: str,
+    task_id: str,
+    filename: str = "",
     student_class: str | None = None,
     subject: str | None = None,
     marks_scheme: MarksScheme | None = None,
     usage_out: dict | None = None,
     thinking_budget: int | None = None,
+    exam_type: str | None = None,
+    total_marks: float | None = None,
+    qp_text: str = "",
+    cache_ttl: str = "",
+    max_output_tokens: int = 64000,
 ) -> GradeReport:
+    # cache_ttl is a Claude prompt-caching control; Gemini's context cache is a
+    # different mechanism this route does not use. Accepted and ignored so the
+    # pipeline can pass one `common` kwargs dict to either provider.
+    del cache_ttl
     if not answer_key_pngs and not answer_key_text:
         raise ValueError("Provide either answer_key_pngs or answer_key_text.")
 
-    client = _make_client(api_key, use_vertex, project, location)
-
-    parts: list[types.Part] = []
-    ctx = exam_context_block(student_class, subject)
-    if ctx:
-        parts.append(_text_part(ctx))
-    parts.append(_text_part("=== QUESTION PAPER ==="))
-    for png in question_paper_pngs:
-        parts.append(_image_part(_downscale_for_model(png)))
-
+    parts: list[dict] = []
+    context = exam_context_block(student_class, subject, exam_type, total_marks)
+    if context:
+        parts.append(_text_part(context))
+    qp_block = paper_text_block(qp_text)
+    if qp_block:
+        parts.append(_text_part(qp_block))
+    if question_paper_pngs:
+        parts.append(_text_part("=== QUESTION PAPER ==="))
+        parts.extend(_image_part(_downscale_for_model(png)) for png in question_paper_pngs)
+    elif not qp_block:
+        parts.append(_text_part(NO_QUESTION_PAPER_BLOCK))
     parts.append(_text_part("=== ANSWER KEY / MARKING SCHEME ==="))
     if answer_key_text:
         parts.append(_text_part(answer_key_text))
-    for png in (answer_key_pngs or []):
-        parts.append(_image_part(_downscale_for_model(png)))
+    parts.extend(_image_part(_downscale_for_model(png)) for png in (answer_key_pngs or []))
+    scheme_block = marks_scheme_block(marks_scheme, total_marks)
+    if scheme_block:
+        parts.append(_text_part(scheme_block))
 
-    msb = marks_scheme_block(marks_scheme)
-    if msb:
-        parts.append(_text_part(msb))
-
-    overlaid_pngs: list[bytes] = []
     if ocr_pages:
-        ocr_by_page = {p.page: p for p in ocr_pages}
-        for i, png in enumerate(student_pngs, start=1):
-            po = ocr_by_page.get(i)
-            overlaid_pngs.append(overlay_anchors_on_png(png, po) if po else png)
+        by_page = {page.page: page for page in ocr_pages}
+        student_images = [
+            overlay_anchors_on_png(png, by_page[i]) if i in by_page else png
+            for i, png in enumerate(student_pngs, start=1)
+        ]
     else:
-        overlaid_pngs = list(student_pngs)
-
-    parts.append(_text_part(f"=== STUDENT'S ANSWER SHEET ({len(overlaid_pngs)} pages, 1-indexed) ==="))
+        student_images = list(student_pngs)
+    parts.append(_text_part(f"=== STUDENT'S ANSWER SHEET ({len(student_images)} pages, 1-indexed) ==="))
     if ocr_pages:
         parts.append(_text_part(
-            "Each line on these page images is overlaid with its OCR line_id (e.g. [P3L7]) in BLUE. "
-            "Question/section header lines are labelled in RED — never anchor a step there. "
-            "Diagram regions are outlined in ORANGE with an anchor like [P7D1] — use those when the "
-            "step's evidence is a figure, table, or hand-drawn diagram (no text). "
-            "Pick step_line_id by LOOKING at the page — match each rubric step to the visible line "
-            "(or diagram region) where the student actually demonstrated that step."
+            "Each visible line has a blue OCR line_id; headers are red and diagram regions are orange. "
+            "Match each rubric step to its actual evidence and never anchor a step to a red header."
         ))
-    for i, png in enumerate(overlaid_pngs, start=1):
-        parts.append(_text_part(f"--- Page {i} ---"))
-        parts.append(_image_part(png))
-
+    for index, png in enumerate(student_images, start=1):
+        page_bytes, mime_type = compress_page_for_model(png)
+        parts.extend((_text_part(f"--- Page {index} ---"), _image_part(page_bytes, mime_type)))
     if ocr_transcript:
         parts.append(_text_part(
-            "=== OCR TRANSCRIPT OF STUDENT'S ANSWER SHEET (lines labelled [PnLk], diagrams [PnDk]) ===\n"
-            "This transcript mirrors the labels overlaid on the page images. Lines tagged (HEADER) "
-            "are question/section labels — never anchor step ticks to them. Lines tagged "
-            "(DIAGRAM REGION) are blank bands where a figure/table lives — use them when the step "
-            "is satisfied by a drawing.\n\n" + ocr_transcript
+            "=== OCR TRANSCRIPT OF STUDENT'S ANSWER SHEET ===\n" + ocr_transcript
         ))
-
     parts.append(_text_part(
-        "Now grade the student's answers against the answer key. Return a complete GradeReport: "
-        "every sub-question in `questions`, every top-level question in `section_totals`, total_score "
-        "must equal the sum of sub-question scores."
-        + (" Populate anchor_line_id and target_line_id from the OCR transcript wherever possible." if ocr_transcript else "")
+        "Grade the student's answers against the answer key. Return a complete GradeReport: "
+        "every sub-question in questions, every top-level question in section_totals, and "
+        "total_score equal to the sum of all sub-question scores."
     ))
 
-    # Use streaming: the new per-sub-part rubric pushes response size up, and
-    # the non-streaming endpoint drops the connection mid-body on long replies
-    # (RemoteProtocolError / "incomplete chunked read"). Streaming reads chunks
-    # as they arrive and survives those long generations.
-    config_kwargs = dict(
-        system_instruction=build_system_prompt(subject),
-        temperature=0,
-        seed=_SEED,                       # reproducible greedy decoding (consistency)
-        response_mime_type="application/json",
+    budget = _THINKING_BUDGET if thinking_budget is None else thinking_budget
+    request = _request(
+        parts,
+        system_instruction=build_system_prompt(subject, student_class, exam_type),
+        max_output_tokens=max(512, min(64000, int(max_output_tokens))),
         response_schema=GradeReport,
-        max_output_tokens=64000,
+        thinking_budget=budget if budget > 0 else None,
     )
-    _tc = _thinking_config(thinking_budget)   # cap thinking tokens — the main Pro cost lever
-    if _tc is not None:
-        config_kwargs["thinking_config"] = _tc
-    config = types.GenerateContentConfig(**config_kwargs)
-
-    text_chunks: list[str] = []
-    finish_reason = None
-    last_chunk = None
-    for chunk in client.models.generate_content_stream(
+    request["generationConfig"]["seed"] = _SEED
+    response = _generate(
+        google_token,
         model=model,
-        contents=[types.Content(role="user", parts=parts)],
-        config=config,
-    ):
-        last_chunk = chunk
-        if chunk.text:
-            text_chunks.append(chunk.text)
-        try:
-            fr = chunk.candidates[0].finish_reason
-            if fr is not None:
-                finish_reason = fr
-        except (AttributeError, IndexError):
-            pass
-
-    if finish_reason and str(finish_reason).endswith("MAX_TOKENS"):
-        raise RuntimeError(
-            "Gemini hit the output token limit before finishing the GradeReport. "
-            "The answer sheet is too long for one call at this rubric verbosity. "
-            "Try (a) switching to gemini-2.5-flash for higher throughput, "
-            "(b) splitting the sheet into smaller batches, or "
-            "(c) using a tighter rubric with fewer criteria per question."
+        request=request,
+        filename=filename,
+        count=len(student_pngs),
+        task_id=task_id,
+    )
+    # Account for a truncated/bad response before any fallback decision.
+    record_usage_event(usage_out, _usage(response, model), stage="primary")
+    finish_reason = _finish_reason(response)
+    if finish_reason.upper().endswith("MAX_TOKENS"):
+        raise OutputLimitExceeded(
+            "Gemini hit the output token limit before finishing the GradeReport."
         )
-
-    full_text = "".join(text_chunks)
-    if not full_text.strip():
-        raise RuntimeError(
-            f"Gemini returned no text (finish_reason={finish_reason}). "
-            "This is often a safety filter or empty response. Try the other provider or a different model."
-        )
-
-    # Prefer the SDK's pre-parsed object on the last chunk if available; fall
-    # back to validating the concatenated JSON ourselves.
-    if usage_out is not None:
-        um = getattr(last_chunk, "usage_metadata", None) if last_chunk is not None else None
-        prompt = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
-        cached = int(getattr(um, "cached_content_token_count", 0) or 0) if um else 0
-        cand = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
-        thoughts = int(getattr(um, "thoughts_token_count", 0) or 0) if um else 0
-        usage_out.update({
-            "provider": "gemini",
-            "model": model,
-            # Gemini's prompt_token_count INCLUDES the cached portion — split it out.
-            "input_tokens": max(0, prompt - cached),
-            "cached_input_tokens": cached,
-            "cache_write_tokens": 0,
-            # Thinking tokens are billed as output.
-            "output_tokens": cand + thoughts,
-        })
-
-    parsed = getattr(last_chunk, "parsed", None) if last_chunk is not None else None
-    if not isinstance(parsed, GradeReport):
-        parsed = GradeReport.model_validate_json(full_text)
-    return _reconcile_report(parsed, marks_scheme)
+    text = _response_text(response)
+    # With internal choice the scheme lists alternatives a student may skip — enforcing
+    # it verbatim would add phantom 0-mark entries and inflate the denominator.
+    authoritative = marks_scheme if scheme_matches_total(marks_scheme, total_marks) else None
+    return _reconcile_report(parse_grade_report(text), authoritative, total_marks)

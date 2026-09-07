@@ -2,11 +2,29 @@
 # PyInstaller spec for the AI Checker desktop client.
 # Build:  pyinstaller AICheckerClient.spec   ->  dist/AICheckerClient.exe
 
+import os
+import json
+
+oauth_datas = []
+for oauth_candidate in ('pw_oauth_config.json', os.path.join('dist', 'pw_oauth_config.json')):
+    if not os.path.exists(oauth_candidate):
+        continue
+    with open(oauth_candidate, encoding='utf-8') as oauth_handle:
+        oauth_config = json.load(oauth_handle)
+    # A browser OAuth client id is public. Never let the desktop bundle silently
+    # absorb a client_secret or any unrelated credential from a nearby config file.
+    if (set(oauth_config) == {'google_client_id'}
+            and str(oauth_config.get('google_client_id') or '').strip()):
+        oauth_datas = [(oauth_candidate, '.')]
+        break
+if not oauth_datas:
+    raise RuntimeError('A minimal pw_oauth_config.json containing only google_client_id is required')
+
 a = Analysis(
     ['run_client.py'],
     pathex=[],
     binaries=[],
-    datas=[('static', 'static'), ('Kalam-Regular.ttf', '.')],
+    datas=[('static', 'static'), ('Kalam-Regular.ttf', '.')] + oauth_datas,
     hiddenimports=[
         # uvicorn resolves these dynamically at runtime, so PyInstaller can't see them.
         'uvicorn.logging',
@@ -19,12 +37,13 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # The client never calls an LLM (the proxy does), so keep the heavy / fragile SDKs
-    # out of the binary entirely — smaller EXE, no grpc/protobuf bundling headaches.
+    # Provider calls use the requests-based pw_access client. Provider SDKs stay out
+    # of the binary; credentials and direct provider clients are forbidden.
     excludes=[
         'anthropic', 'google', 'google_genai', 'grpc', 'grpc_status',
         'streamlit', 'matplotlib', 'pandas', 'numpy',
-        'tkinter', 'PyQt5', 'PySide2', 'IPython', 'pytest',
+        'tkinter', 'PyQt5', 'PySide2', 'IPython', 'pytest', '_pytest',
+        'mypy', 'openpyxl',
     ],
     noarchive=False,
     optimize=0,

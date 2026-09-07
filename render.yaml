@@ -13,13 +13,6 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
-      # Secrets — set the values in the Render dashboard (sync:false keeps them out of git).
-      # GOOGLE_SERVICE_ACCOUNT_JSON: paste the ENTIRE service-account JSON as one line.
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: MATHPIX_APP_KEY
-        sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_JSON
-        sync: false
-      - key: ANTHROPIC_API_KEY
+      # Public OAuth web-client ID; authorize http://127.0.0.1:8765 for the EXE.
+      - key: PW_GOOGLE_CLIENT_ID
         sync: false

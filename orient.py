@@ -122,6 +122,31 @@ def _png_upright(page_png: bytes, angle: int) -> bytes:
     return buf.getvalue()
 
 
+# Rebuilt pages carry a phone PHOTO. PNG cannot compress a photo, and PyMuPDF stores
+# the inserted stream without re-compressing it, so a 4 MB booklet with four sideways
+# pages came back as 159 MB (4167x3125 px x 3 bytes, uncompressed, per rebuilt page) —
+# big enough to break the grading payload downstream. JPEG at a sane resolution keeps
+# the same page perfectly legible at ~1 MB.
+_REBUILD_MAX_EDGE = 2600
+_REBUILD_QUALITY = 90
+
+
+def _jpeg_upright(page_png: bytes, angle: int) -> bytes:
+    """Upright the page as a JPEG, capped so we never upsample a phone photo."""
+    img = ImageOps.exif_transpose(Image.open(BytesIO(page_png)))
+    if angle:
+        img = img.rotate(angle, expand=True)
+    img = img.convert("RGB")
+    longest = max(img.size)
+    if longest > _REBUILD_MAX_EDGE:
+        scale = _REBUILD_MAX_EDGE / longest
+        img = img.resize((max(1, round(img.width * scale)),
+                          max(1, round(img.height * scale))), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=_REBUILD_QUALITY, optimize=True)
+    return buf.getvalue()
+
+
 def _clean_rotations(values, n: int) -> list[int]:
     out = []
     for v in (values or []):
@@ -180,13 +205,112 @@ def normalize_orientation(data: bytes, filename: str, rotations=None,
         if rots[i] == 0:
             out.insert_pdf(doc, from_page=i, to_page=i)          # keep original page as-is
         else:
-            up = _png_upright(png, rots[i])
-            img = fitz.open(stream=up, filetype="png")
+            up = _jpeg_upright(png, rots[i])
+            img = fitz.open(stream=up, filetype="jpeg")
             rect = img[0].rect
             pg = out.new_page(width=rect.width, height=rect.height)
             pg.insert_image(rect, stream=up)
             img.close()
-    result = out.tobytes()
+    result = out.tobytes(deflate=True, garbage=3)
     out.close()
     doc.close()
     return result, rots, True
+
+
+# ---------- Two-page spreads -----------------------------------------------------
+#
+# A school student photographs the OPEN notebook, so one image holds two facing
+# pages. Nothing upstream notices: the writing is upright, so the rotation pass
+# passes it through, and OCR then orders lines by their y on the page — which
+# interleaves the left page with the right one and hands the grader a scrambled
+# answer. MEASURED on a Class 12 Chemistry sheet: two of its five images were
+# spreads, and 30 of 46 questions came back "not attempted" against a copy where
+# the student had plainly answered Q19 through Q21.
+#
+# A spread is told from a single page by shape. A notebook page is taller than it
+# is wide; two of them side by side are wider than tall, by a wide margin.
+_SPREAD_MIN_ASPECT = 1.20    # width/height above this is two pages, not one
+_SPREAD_SEARCH = 0.16        # look this far either side of the middle for the gutter
+
+
+def _gutter_x(img: "Image.Image") -> int:
+    """Where the two pages meet — the emptiest column band near the middle.
+
+    Not the DARKEST column: the binding does throw a shadow, but it is a thin line
+    inside a wide band of blank margin, and on a photo whose top edge shows the desk
+    a darkness sum picks the background instead — it split one spread at 64% of its
+    width, straight through the right-hand page. What reliably marks the fold is the
+    absence of WRITING: both pages keep a margin, so the emptiest window in the
+    middle band is the gutter. Falls back to the centre when nothing stands out.
+    """
+    import numpy as np
+
+    g = img.convert("L")
+    w, h = g.size
+    lo, hi = int(w * (0.5 - _SPREAD_SEARCH)), int(w * (0.5 + _SPREAD_SEARCH))
+    if hi - lo < 8:
+        return w // 2
+    arr = np.asarray(g, dtype=np.uint8)
+    # Ignore the top and bottom eighths: that is where a photo shows the desk, the
+    # page edge and the shadow, none of which say anything about the fold.
+    band = arr[int(h * 0.12):int(h * 0.88), lo:hi]
+    ink = (band < 140).sum(axis=0).astype(float)
+    win = max(3, int(w * 0.01))                  # a fold is ~1% of the spread wide
+    if win < ink.size:
+        smooth = np.convolve(ink, np.ones(win) / win, mode="same")
+    else:
+        smooth = ink
+    # The MIDDLE of the emptiest region, not its first column: where the two pages
+    # keep a generous margin the empty run is wide, and argmin alone cuts at the edge
+    # of that run — one spread split 35/65 and carried half the left page onto the
+    # right one. Every column within a hair of the minimum is part of the same gutter.
+    floor = smooth.min()
+    flat = np.flatnonzero(smooth <= floor + max(1.0, floor * 0.15))
+    return lo + int(np.median(flat))
+
+
+def split_two_page_spreads(data: bytes, filename: str,
+                           dpi: int = 150) -> tuple[bytes, bool]:
+    """Split every photographed spread into its two facing pages, left then right.
+
+    Returns (bytes, changed?). When no page is a spread the ORIGINAL bytes come
+    back untouched, so a normal upload pays nothing. Any failure returns the input
+    unchanged — a scrambled read is bad, losing the copy is worse.
+    """
+    import fitz
+
+    try:
+        if not (filename or "").lower().endswith(".pdf"):
+            return data, False
+        doc = fitz.open(stream=data, filetype="pdf")
+        if not any(p.rect.width / max(p.rect.height, 1) >= _SPREAD_MIN_ASPECT
+                   for p in doc):
+            doc.close()
+            return data, False
+        out = fitz.open()
+        for page in doc:
+            if page.rect.width / max(page.rect.height, 1) < _SPREAD_MIN_ASPECT:
+                out.insert_pdf(doc, from_page=page.number, to_page=page.number)
+                continue
+            img = Image.open(BytesIO(page.get_pixmap(dpi=dpi).tobytes("png")))
+            cut = _gutter_x(img)
+            for box in ((0, 0, cut, img.height), (cut, 0, img.width, img.height)):
+                half = img.crop(box)
+                if half.width < 40 or half.height < 40:
+                    continue
+                jpeg = _jpeg_upright(_png_bytes(half), 0)
+                w, h = Image.open(BytesIO(jpeg)).size
+                pg = out.new_page(width=w, height=h)
+                pg.insert_image(fitz.Rect(0, 0, w, h), stream=jpeg)
+        result = out.tobytes(garbage=3, deflate=True)
+        out.close()
+        doc.close()
+        return result, True
+    except Exception:
+        return data, False
+
+
+def _png_bytes(img: "Image.Image") -> bytes:
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()

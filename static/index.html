@@ -3,27 +3,45 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Checker — Handwritten Grader</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <title>AI Copy Checker — Handwritten Grader</title>
+  <link rel="stylesheet" href="/styles.css?v=2026.09.07.1" />
 </head>
-<body>
+<body class="auth-locked">
   <div class="wrap">
     <!-- Brand hero -->
     <header class="hero">
       <div class="badge">PW</div>
       <div>
-        <h1>AI Checker</h1>
+        <h1>AI Copy Checker</h1>
         <p>Automated handwritten answer-sheet evaluation</p>
       </div>
     </header>
 
+    <section id="authCard" class="card auth-card">
+      <div class="step"><span class="n">PW</span><span class="t" id="authTitle">Sign in to AI Copy Checker</span></div>
+      <p class="sub" id="authSub">Use your authorized <b>@pw.live</b> Google account. Access is checked before every grading action.</p>
+      <div id="googleSignIn"></div>
+      <button id="signOut" class="ghost-btn small hidden" type="button">Sign out</button>
+      <div id="authStatus" class="muted">Preparing secure sign-in…</div>
+    </section>
+
     <!-- Step 1 -->
     <section class="card">
       <div class="step"><span class="n">1</span><span class="t">Exam details</span></div>
-      <p class="sub">Grading is calibrated to the class level and subject conventions.</p>
+      <p class="sub">Level and subject guide the marking rules. The uploaded official files identify the exact exam package.</p>
       <div class="grid2">
-        <label>Class / Grade<input id="studentClass" type="text" placeholder="e.g. Class 10" /></label>
-        <label>Subject<input id="subject" type="text" placeholder="e.g. Social Science" /></label>
+        <label>Class / CA level<input id="studentClass" type="text" placeholder="e.g. Class 10, CA Inter, CA Foundation" /></label>
+        <label>Subject<input id="subject" type="text" placeholder="e.g. Social Science, Advanced Accounting, Taxation" /></label>
+        <label>Exam type
+          <select id="examType">
+            <option value="">Auto-detect</option>
+            <option value="school">School / Board</option>
+            <option value="professional">Professional (CA / CMA / CS)</option>
+          </select>
+        </label>
+        <label>Paper total marks
+          <input id="totalMarks" type="number" step="0.5" min="0.5" placeholder="e.g. 100" />
+        </label>
       </div>
     </section>
 
@@ -32,7 +50,7 @@
       <div class="step"><span class="n">2</span><span class="t">Upload files</span></div>
       <p class="sub">One question paper, and any number of student answer sheets to grade against it — add them all at once or a few at a time.</p>
       <div class="grid2">
-        <label>Question paper (PDF/PNG/JPG)
+        <label>Official question paper (PDF/PNG/JPG) <span class="muted">— required</span>
           <input id="qpFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
         </label>
         <div>
@@ -56,34 +74,34 @@
     <!-- Step 3 -->
     <section class="card">
       <div class="step"><span class="n">3</span><span class="t">Answer key</span></div>
-      <p class="sub">Upload a marking scheme, or let AI draft one from the question paper.</p>
+      <p class="sub">Automatic release requires the official, text-readable marking scheme. AI generation is draft-only.</p>
       <div class="radios">
         <label><input type="radio" name="keySource" value="upload" checked /> Upload answer key / rubric file</label>
-        <label><input type="radio" name="keySource" value="rubric" /> Generate a rubric with AI</label>
+        <label><input type="radio" name="keySource" value="rubric" /> Generate draft rubric (cannot be released)</label>
       </div>
       <div id="keyUpload">
         <input id="akFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
       </div>
       <div id="keyRubric" class="hidden">
         <button id="genRubric" class="ghost-btn" type="button">✨ Generate rubric from question paper</button>
-        <textarea id="rubricText" rows="10" placeholder="The generated rubric appears here. Edit freely — this is what the grader uses."></textarea>
+          <textarea id="rubricText" rows="10" placeholder="Draft only. Automatic release still requires an uploaded official marking scheme."></textarea>
       </div>
     </section>
 
     <!-- Step 4 -->
     <section class="card">
       <div class="step"><span class="n">4</span><span class="t">Maximum marks (denominator)</span></div>
-      <p class="sub">Read from the printed “[N Marks]” tags, then locked — every student is scored out of the same total.</p>
-      <button id="detectMarks" class="ghost-btn" type="button">🔢 Detect max marks from question paper</button>
+      <p class="sub">Read from the official paper and locked. If deterministic reading is unavailable, Claude and Gemini must independently agree.</p>
+      <button id="detectMarks" class="ghost-btn" type="button">🔢 Detect &amp; verify max marks</button>
       <div id="marksMethod" class="muted"></div>
       <table id="marksTable" class="marks hidden">
-        <thead><tr><th>Question / part</th><th>Max</th><th>What it is</th><th></th></tr></thead>
+        <thead><tr><th>Question / part</th><th>Max</th><th>What it is</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div id="marksFooter" class="hidden">
-        <button id="addMark" class="ghost-btn small" type="button">+ Add row</button>
+      <div id="marksFooter">
         <span class="locked">🔒 Locked total: <b id="lockedTotal">0</b></span>
       </div>
+      <p class="muted">“OR” and “answer any” rules are extracted and independently verified automatically; no JSON or manual choice setup is required.</p>
     </section>
 
     <!-- Step 5 -->
@@ -110,10 +128,11 @@
       <div id="resultRows"></div>
     </section>
 
-    <footer class="foot">AI Checker · grading core runs server-side · objective questions scored deterministically</footer>
+    <footer class="foot">AI Copy Checker · grading core runs server-side · objective questions scored deterministically · <span id="buildId">build loading…</span></footer>
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="/app.js?v=2026.09.07.1"></script>
 </body>
 </html>

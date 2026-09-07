@@ -1,15 +1,8 @@
-# FastAPI stack (server.py — the primary app)
+# FastAPI backend used by the Windows desktop build and hosted web build
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
-# Streamlit kept for the legacy app.py; remove once fully migrated.
-streamlit>=1.32
-anthropic>=0.45
 pymupdf>=1.24
 pillow>=10.0
 pydantic>=2.0
-python-dotenv>=1.0
 requests>=2.31
-google-genai>=2.0,<3   # 2.x supports ThinkingConfig.thinking_budget (the Pro cost lever)
-google-api-python-client>=2.0
-google-auth>=2.0
