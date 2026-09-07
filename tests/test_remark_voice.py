@@ -184,6 +184,28 @@ check("prompt shows the human evaluator's real sentence as the model",
       "commenced operation in P.Y. 2021-22" in prompt)
 
 print()
+print("== a 1-mark part is not split into method and answer ==")
+# MEASURED on a Class 10 Physics copy. Q6(i) is "[1 M] Find the position of the
+# candle flame (u)". The student wrote u = -30 cm, which is the paper's own answer,
+# and scored 0.5 with the remark "Stated u=-30 cm without showing magnification
+# calculation step". The numerical rule said a correct value carries the question
+# "only if working is shown", and on a 1-mark part that invents a 0.5 method / 0.5
+# answer split the paper never allocated: the mark is for producing the value, and
+# an examiner marking one mark for "find u" gives it for u = -30 cm. The same paper
+# graded a second copy that DID show the magnification step at 1/1, so the tool was
+# also scoring the same correct answer two different ways.
+_np = build_system_prompt("Physics", "Class 10", "school")
+check("the 1-mark exception is stated",
+      "no room for a separate method mark" in _np)
+check("it names the full mark, not a fraction",
+      "takes the FULL mark and unshown working costs NOTHING" in _np)
+check("it forbids the invented half", 'invents a split the paper never allocated' in _np)
+check("but a part that ASKS for the working keeps it",
+      '"show that"' in _np and "there the working is the answer" in _np)
+check("the general rule for bigger parts still stands",
+      "A correct final value carries the question only if working is shown" in _np)
+
+print()
 if FAILS:
     print(f"FAILED: {len(FAILS)} -> {FAILS}")
     sys.exit(1)
