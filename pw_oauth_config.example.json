@@ -1,0 +1,4 @@
+{
+  "_readme": "Rename to pw_oauth_config.json and fill in the PW Google OAuth WEB client ID. For the desktop EXE, place the renamed file NEXT TO AICheckerClient.exe (or set the PW_GOOGLE_CLIENT_ID environment variable). If the file exists in the project root at build time, PyInstaller bakes it into the EXE. The ID is in Render (ai-checker service > Environment > PW_GOOGLE_CLIENT_ID) or Google Cloud Console > APIs & Services > Credentials. The OAuth client must list the app's origins as authorized JavaScript origins, e.g. http://127.0.0.1:8765 for the EXE and the Render URL for the web build.",
+  "google_client_id": "PASTE-CLIENT-ID-HERE.apps.googleusercontent.com"
+}
