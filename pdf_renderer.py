@@ -55,6 +55,26 @@ _TICK_TOTAL_MIN = 0.65
 _TICK_TOTAL_MAX = 1.70
 
 
+# A tick stands for the answer it marks, so it is never taller than that answer.
+# _draw_tick runs 1.4 * size ABOVE its anchor, so on the three stacked one-line MCQs
+# of a Class 10 Physics copy a full-size tick climbed into the option above it and the
+# block read as one scribble. Only ever binds on SHORT answers: a six-line answer
+# spans far more than its own tick.
+_TICK_RISE = 1.4
+_TICK_MIN_SIZE = 12.0
+
+
+def _tick_capped_to_answer(size: float, anchor_lines: list) -> float:
+    """Shrink a whole-answer tick that would out-reach the answer it belongs to."""
+    if not anchor_lines:
+        return size
+    span = (max(l["y1"] for l in anchor_lines)
+            - min(l["y0"] for l in anchor_lines))
+    if span <= 0:
+        return size
+    return min(size, max(_TICK_MIN_SIZE, span / _TICK_RISE))
+
+
 def _answer_length_scale(answer_lines: int) -> float:
     """How much a whole-answer tick grows with the length of the answer."""
     if not answer_lines or answer_lines <= 0:
@@ -888,6 +908,48 @@ _CONTENT_W: dict[tuple[int, int], float] = {}
 _STRIP_SLOTS: dict[int, dict[int, list[tuple[float, float]]]] = {}
 
 
+_SHEET_RIGHT: dict[tuple[int, int], float] = {}
+
+
+def _sheet_right_edge(page: fitz.Page, content_w: float) -> float:
+    """Where the student's SHEET ends, which is NOT where the page ends.
+
+    A phone photo of a notebook is embedded in an A4 page with white space around
+    it. MEASURED on a live Class 10 Physics copy: the paper occupied x 113..481 of
+    a 595pt page. Marks were placed against the PAGE width, so a tick for a line
+    whose ink ran to 478 was drawn at 492 - floating in the blank margin BESIDE the
+    sheet rather than on the answer. Short lines looked right and long ones did not,
+    which is exactly how it was reported ("the ticks are not on the actual answer").
+
+    An ordinary full-page scan reports its own width, so nothing moves for it.
+    """
+    return _SHEET_RIGHT.get((id(page.parent), page.number), content_w)
+
+
+def _measure_sheet_right(page: fitz.Page, content_w: float) -> float:
+    """Scan for the rightmost non-white column of the sheet. Must run BEFORE any
+    mark is drawn, or a mark already sitting in the margin would extend the edge."""
+    try:
+        pixmap = page.get_pixmap(
+            dpi=36, clip=fitz.Rect(0, 0, content_w, page.rect.height))
+    except Exception:
+        return content_w
+    width, height, n, data = pixmap.width, pixmap.height, pixmap.n, pixmap.samples
+    if width <= 0 or height <= 0:
+        return content_w
+    for x in range(width - 1, -1, -1):
+        for y in range(0, height, 3):
+            i = (y * width + x) * n
+            if not (data[i] > 244 and data[i + 1] > 244 and data[i + 2] > 244):
+                return min(content_w, (x + 1) / width * content_w)
+    return content_w
+
+
+def _mark_area_right(page: fitz.Page) -> float:
+    """Right limit for anything drawn on the answer: the sheet, not the page."""
+    return _sheet_right_edge(page, _content_width(page))
+
+
 def _content_width(page: fitz.Page) -> float:
     """Width of the student-writing area (original page width), excluding the
     right-hand marks strip. Falls back to full page width for un-widened pages."""
@@ -1595,6 +1657,19 @@ def _clear_x_for_mark(doc: "fitz.Document | None", by_lid: dict, page_no: int, y
     return x_from, 0.0, 1.0
 
 
+def _is_objective_mark(m) -> bool:
+    """Whether this question is an objective (MCQ / true-false) item.
+
+    Shared so the anchor pass and the marking pass cannot disagree: they did, and an
+    MCQ was anchored as prose and then marked as objective.
+    """
+    return (
+        bool(getattr(m, "objective", False))
+        or bool(str(getattr(m, "correct_option", "") or "").strip())
+        or bool(str(getattr(m, "chosen_option", "") or "").strip())
+    )
+
+
 def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
                             by_lid: dict[str, dict],
                             placed_by_page: dict[int, list[float]] | None = None,
@@ -1613,11 +1688,7 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     mx = float(getattr(m, "max_score", 0) or 0)
     remark = (getattr(m, "remark", "") or "").strip()
     qid = str(getattr(m, "qid", "") or "").strip()
-    is_obj = (
-        bool(getattr(m, "objective", False))
-        or bool(str(getattr(m, "correct_option", "") or "").strip())
-        or bool(str(getattr(m, "chosen_option", "") or "").strip())
-    )
+    is_obj = _is_objective_mark(m)
     safe_layout = _SAFE_LAYOUT.get()
 
     # Collect criteria for step-by-step marking
@@ -1682,6 +1753,20 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
     looks_enumerated = enumerated >= 3 and enumerated >= len(criteria) / 2.0
     real = [pl for pl in my_lines if not _is_header(pl.get("text") or "")]
     anchor_lines = real or my_lines
+    if is_obj:
+        # An MCQ answer is ONE line - the one carrying the chosen option - and the
+        # band heuristics above are built for prose that runs many lines. Trust the
+        # question's own anchor and stop there. Two ways the band gets this wrong:
+        #   * it comes back EMPTY, because "Q.1 (D) 05W" reads as a question header
+        #     and q_anchor snapped past it onto the NEXT question's line;
+        #   * it OVER-RUNS into the following lines when the next question's heading
+        #     is misread ("Q.4" came back as "0.4"), so the tick is sized for an
+        #     82pt span instead of the 24pt line it marks.
+        own = by_lid.get((getattr(m, "anchor_line_id", "") or "").strip())
+        if own is not None:
+            anchor_lines = [own]
+        elif anchor_lines:
+            anchor_lines = anchor_lines[:1]
 
     # "Unattempted" = scored 0 with no student writing in the band, or the verdict says so.
     # Objective items carry an authoritative `attempted` flag from the visual reader.
@@ -1920,7 +2005,9 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # Place the tick just past where the writing ends, but never let the
             # cluster cross the right edge onto the marks strip: the right cap
             # wins over the left floor when the line itself starts far right.
-            right_cap = cwp - 6 - cluster_w
+            # Bounded by the SHEET, not the page: past its edge the mark is not on
+            # the student's answer at all, it is floating in the blank surround.
+            right_cap = min(cwp, _mark_area_right(pg)) - 6 - cluster_w
             writing_end = _row_writing_end(by_lid, pl["page"], pl["y0"], pl["y1"],
                                            pl["x0"], pl["x1"], cwp)
             tick_x = min(writing_end + 12 + _wobble(sstep, 0, amp=5), right_cap)
@@ -1986,64 +2073,16 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
         if not drew_positive and aw <= 1e-6 and anchor_lines and not unattempted:
             first = anchor_lines[0]
             fpg = student_doc[first["page"] - 1]
-            fx = max(2.0, min(first["x1"] + 12, _content_width(fpg) - 40))
+            fx = max(2.0, min(first["x1"] + 12, _mark_area_right(fpg) - 40))
             fy = (first["y0"] + first["y1"]) / 2
-            _draw_cross(fpg, fx, fy, size=_ms(24), seed=seed + "x0")
+            _draw_cross(fpg, fx, fy, size=_ms(18), seed=seed + "x0")
 
-        # The question's TOTAL, written at the HEAD of the answer — where the human
-        # examiner puts it. On the marked copy for this very paper the evaluator wrote
-        # "10/10" beside "Answer - 2", "10/10" beside "Answer - 3", "4/5" beside
-        # "Answer - 4(a)": always at the top, never at the foot.
-        #
-        # Writing it where the answer ENDED put it next to the following answer's
-        # heading, because that is what sits there: Q2's total landed on page 3 above
-        # "Answer - 3", Q5(b)'s on page 7 above "Answer - 1". It also split a question
-        # across pages — Q4(b)'s total was written on page 6 while its strip entry
-        # stayed on page 5, so page 6 showed a bare "Q4b 4.5/5" against an empty strip
-        # — and it left page 1 with no mark at all, since every criterion the model
-        # anchored for Q2 pointed at pages 2 and 3. At the head the total sits beside
-        # its own strip entry, on the page the answer starts.
-        # Written as "3/3", never circled, so it cannot be mistaken for a step mark.
-        if anchor_lines and not unattempted:
-            last = sorted(anchor_lines, key=lambda p: (p["page"], p["y0"]))[0]
-            tpg = student_doc[last["page"] - 1]
-            tcw = _content_width(tpg)
-            # Label it. A bare "5.5/6" beside a heading reads as that heading's score;
-            # "Q3.a 5.5/6" cannot be misread whatever else shares the line.
-            total_txt = f"{qid} {_fmt_mark(aw)}/{_fmt_mark(mx)}".strip()
-            size = _ms(15)
-            width = fitz.get_text_length(total_txt, fontname="hebo", fontsize=size) + 6
-            ty = (last["y0"] + last["y1"]) / 2
-            placed_t = placed_by_page.setdefault(last["page"], [])
-            # Bounded to this question's own last line. Keeping the total on the right
-            # PAGE is not enough: the walk below only stopped at the foot of the page,
-            # so Q5(b)'s total stepped 26pt at a time off the end of its answer and
-            # came to rest inside the MCQ block underneath. It then sat in `placed`,
-            # where it collided with the first MCQ and pushed every tick and cross in
-            # that block one answer down — the option the student got RIGHT ended up
-            # carrying a cross. An overlap on its own line is the lesser evil.
-            line_h_t = max(14.0, last["y1"] - last["y0"])
-            ty_limit = last["y1"] + line_h_t
-            while any(abs(ty - py) < 26 for py in placed_t) and ty + 26 <= ty_limit:
-                ty += 26
-            placed_t.append(ty)
-            tx = max(2.0, min(last["x1"] + 14, tcw - 6 - width))
-            tx, t_dy, t_shrink = _clear_x_for_mark(
-                student_doc, by_lid, last["page"], ty, tx, width, tcw - 6 - width,
-                # This is a text label, not a small circled numeral.  Probe the
-                # whole label width; probing only a 12pt disc at its centre let
-                # the ends of labels such as ``Q16 5/6`` print through an answer
-                # even though the centre happened to sit over blank paper.
-                own_lid=last["lid"], probe_dx=width / 2,
-                probe_r=max(size * 0.8, width * 0.52),
-                lift_max=min(_MARK_LIFT_MAX, line_h_t * 0.5))
-            ty += t_dy
-            size *= t_shrink
-            try:
-                tpg.insert_text((tx, ty + size * 0.35), total_txt, fontsize=size,
-                                color=RED, fontname="hebo")
-            except Exception:
-                pass
+        # The question's TOTAL is NOT written on the answer. It is already printed
+        # in the right-hand margin strip beside this question's breakdown ("Q4
+        # 1+0.5=1.5/3"), and printing it twice put a second, bolder "Q4 1.5/3" on top
+        # of the student's own writing - reported as "why are these marks on the
+        # student's answer? it should be on right margin strip". The sheet carries the
+        # ticks, crosses and circled step marks; the strip carries the arithmetic.
     else:
         # Single mark question: draw one tick (or cross).
         # OBJECTIVE (MCQ / assertion-reason / match): anchor to the question's OWN
@@ -2110,33 +2149,40 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # accept a small overlap, rather than drifting it onto another answer.
             if slot is not None:
                 y_mark = slot
-        if not is_obj:
-            placed.append(y_mark)
+        # Objective rows join the ledger too, so a later answer's mark is nudged
+        # clear of an MCQ tick instead of being drawn through it. Objective rows
+        # themselves are never nudged - see the bounded search above.
+        placed.append(y_mark)
 
-        # Objective verdicts are rendered only in the QID-labelled margin lane.
-        if not is_obj:
+        # EVERY question is marked on the sheet - objective included. It used to be
+        # "if not is_obj", so an MCQ carried a verdict in the margin lane and nothing
+        # at all beside the student's own answer. The reviewer asked for the opposite:
+        # "make sure we tick each question and give marks like a teacher." The one
+        # remaining reason to leave the sheet clean is margin-only release mode, which
+        # this block already tested for internally.
+        if not safe_layout:
             tick_size = _tick_size_for_line(32, line_h,
                                             answer_lines=len(anchor_lines))
+            tick_size = _tick_capped_to_answer(tick_size, anchor_lines)
             cluster_w = tick_size * 1.6
-            tick_x = max(2.0, min(x_end + 20, mcw - 6 - cluster_w))
-            # Same clearance as a step mark. Without it a whole-question mark lands
-            # in the amounts column of a ledger row exactly as the step marks did.
+            mark_right = min(mcw, _mark_area_right(mark_page))
+            # A teacher's tick goes where the WRITING ends. The anchor may be a stub
+            # ("(c)" is its own OCR line) while the working runs on across the row.
             if anchor_lines:
-                tick_x, whole_dy, w_shrink = _clear_x_for_mark(
-                    student_doc, by_lid, mark_page_num, y_mark, tick_x, cluster_w,
-                    mcw - 6 - cluster_w, own_lid=anchor.get("lid", ""),
-                    probe_dx=tick_size * 0.75, probe_r=tick_size * 0.85,
-                    # The bound this branch already sets for itself: "a line-anchored
-                    # mark may move at most ~one line-height from its anchor, so it
-                    # can never cascade onto a different answer".
-                    lift_max=min(_MARK_LIFT_MAX, line_h))
-                y_mark += whole_dy
-                tick_size *= w_shrink
-            if safe_layout:
-                pass
-            elif aw <= 1e-6:  # Zero marks
+                x_end = max(x_end, _row_writing_end(
+                    by_lid, mark_page_num, anchor["y0"], anchor["y1"],
+                    anchor["x0"], x_end, mcw))
+            # No ink search for the GLYPH. Ratified: "there is no issue if ticks land
+            # on student's text as teacher also do the same." Hunting for blank paper
+            # slid a tick up to _MARK_SLIDE_MAX away from the words it was marking,
+            # which read as a tick belonging to nothing - the complaint that started
+            # this. A circled MARK still searches (see the step path): a numeral over
+            # a numeral is unreadable, where a stroke over a word is just marking.
+            tick_x = max(2.0, min(x_end + 12, mark_right - 6 - cluster_w))
+            if aw <= 1e-6:  # Zero marks
                 if not unattempted:   # attempted-but-wrong → cross; unattempted → nothing
-                    _draw_cross(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+                    _draw_cross(mark_page, tick_x, y_mark, size=tick_size * 0.7,
+                                seed=seed)
                     marked_on_sheet = True
             else:
                 # Same rule for a whole descriptive answer: tick only for full marks,
@@ -2156,7 +2202,14 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # equally accepted". The per-step path already crosses its zeros; a
             # question scored as a single mark did not, so on Q1(a)(i) the invented
             # provision was reduced to nothing and still looked accepted on the page.
-            for zc in (() if safe_layout else (getattr(m, "criteria", None) or [])):
+            # Only for a PART-marked answer. When the whole question scored zero it
+            # has just been crossed once above, and running this too drew a SECOND
+            # cross on the same answer - four crosses piled onto the two lines of a
+            # Class 10 Q6, one of them landing on the word "between". The comment
+            # below predates the per-step cross and its "the per-step path already
+            # crosses its zeros" premise no longer holds here.
+            for zc in (() if aw <= 1e-6
+                       else (getattr(m, "criteria", None) or [])):
                 if float(getattr(zc, "awarded", 0) or 0) > 1e-6:
                     continue
                 zl = by_lid.get((getattr(zc, "step_line_id", "") or "").strip())
@@ -2164,11 +2217,11 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
                     continue
                 zpg = student_doc[zl["page"] - 1]
                 zw = _ms(20)
-                zx = max(2.0, min(zl["x1"] + 12, _content_width(zpg) - 8 - zw))
+                zx = max(2.0, min(zl["x1"] + 12, _mark_area_right(zpg) - 8 - zw))
                 zy = (zl["y0"] + zl["y1"]) / 2
                 zx, zdy, zsh = _clear_x_for_mark(
                     student_doc, by_lid, zl["page"], zy, zx, zw * 1.6,
-                    _content_width(zpg) - 6 - zw * 1.6, own_lid=zl["lid"],
+                    _mark_area_right(zpg) - 6 - zw * 1.6, own_lid=zl["lid"],
                     probe_dx=zw * 0.75, probe_r=zw * 0.85, probe_dy=-zw * 0.55,
                     lift_max=0.0)
                 _draw_cross(zpg, zx, zy + zdy, size=zw * zsh, seed=seed + "z" + zl["lid"])
@@ -2438,7 +2491,10 @@ def _annotate_questions(student_doc: fitz.Document, questions: list,
 
     def q_anchor(q) -> tuple[int, float]:
         pl = by_lid.get(getattr(q, "anchor_line_id", "") or "")
-        if pl and not _is_header(pl["text"]):
+        # An MCQ's answer line IS its label - "Q.1 (D) 25W" - so the header test
+        # below would snap it onto the NEXT question's line, and region_start would
+        # then floor its tick there. It has exactly one line and this is it.
+        if pl and (not _is_header(pl["text"]) or _is_objective_mark(q)):
             return (pl["page"], (pl["y0"] + pl["y1"]) / 2)
         if pl and _is_header(pl["text"]):
             # Model anchored to a form / section / bare-label line — snap to the
@@ -2839,6 +2895,7 @@ def _build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
     # inherit this one's ink masks and place its marks against the wrong page.
     # Safe because _RENDER_LOCK serialises builds, exactly as for _CONTENT_W.
     _MARK_INK.clear()
+    _SHEET_RIGHT.clear()
     widened = fitz.open()
     for pno in range(len(student_doc)):
         src = student_doc[pno]
@@ -2846,6 +2903,10 @@ def _build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
         strip = max(STRIP_MIN_WIDTH, w * STRIP_FRACTION)
         npage = widened.new_page(width=w + strip, height=h)
         npage.show_pdf_page(fitz.Rect(0, 0, w, h), student_doc, pno)
+        # Measured HERE: before the divider is ruled and before any mark is drawn.
+        # The divider sits on x=w and bleeds into a clip that ends there, so measuring
+        # after it reported the full page width every time and the cap never engaged.
+        _SHEET_RIGHT[(id(widened), npage.number)] = _measure_sheet_right(npage, w)
         # Divider line only — a printed "MARKS / REMARKS" header on every page
         # made the sheet look machine-annotated. Teachers just rule a margin.
         npage.draw_line(fitz.Point(w, 0), fitz.Point(w, h), color=RED, width=1.0)

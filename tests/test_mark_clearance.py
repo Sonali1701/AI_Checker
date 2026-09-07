@@ -152,7 +152,10 @@ _render_question_marks(
 drawn = [sp for b in pg.get_text("dict")["blocks"] for l in b.get("lines", [])
          for sp in l["spans"]
          if sp["text"].strip() and _is_red(*_rgb(sp["color"]))]
-check("two step marks plus the question total were drawn", len(drawn) == 3,
+# Two step marks and nothing else: the question total is printed in the right-hand
+# strip, not on the answer, so it is no longer one of the things that has to be kept
+# clear of the student's figures here.
+check("both step marks were drawn", len(drawn) == 2,
       f"{len(drawn)} red spans: {[sp['text'].strip() for sp in drawn]}")
 _mask, _scale = student_ink_mask(pg)
 worst = max((_ink_under_mark(_mask, _scale, sp["bbox"]) for sp in drawn),

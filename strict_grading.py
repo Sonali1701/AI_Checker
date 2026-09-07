@@ -95,6 +95,11 @@ def _choice_letter(value: str) -> str:
     return {"1": "A", "2": "B", "3": "C", "4": "D"}.get(raw, raw)
 
 
+# A bracketed "R" is the Reason of an assertion-reason item. No A-D paper offers
+# an option R, so this token never competes with a choice - it identifies one.
+_ASSERTION_REF_RE = re.compile(r"\(\s*R\s*\)", re.IGNORECASE)
+
+
 def _objective_choice_from_line(text: str, question_number: int | None = None) -> str:
     """Read one A-D / 1-4 choice from a student's numbered answer line.
 
@@ -114,6 +119,23 @@ def _objective_choice_from_line(text: str, question_number: int | None = None) -
     tokens = [_choice_letter(match.group(1)) for match in _PAREN_OBJECTIVE_RE.finditer(value)]
     tokens = [token for token in tokens if token in {"A", "B", "C", "D"}]
     if len(set(tokens)) == 1:
+        return tokens[0]
+    # An ASSERTION-REASON answer restates the claim it is judging, so the line
+    # carries a second bracketed capital that is not a choice:
+    #     Q3 (D) (A) is false, but (R) is true
+    # There is no option "(R)" on any A-D paper, so a literal (R) marks the line as
+    # assertion-reason prose and the later (A) as a reference to the Assertion. The
+    # option is then the first token after the label, which is what this function's
+    # contract says it is. MEASURED on a Class 10 PW Physics copy: the student chose
+    # (D), correctly, and this returned "" - so the strict objective gate could not
+    # anchor the row and HELD the entire paper.
+    #
+    # Deliberately narrow. Only a genuine (R) reference enables it, and only when
+    # every later token is the Assertion's (A). A student who writes two real
+    # options - a correction like "(A) ... (C)" - still fails closed, which is the
+    # behaviour this all-agree rule exists to provide.
+    if (tokens and _ASSERTION_REF_RE.search(value)
+            and set(tokens[1:]) <= {"A"}):
         return tokens[0]
     match = _TRAILING_OBJECTIVE_RE.search(value)
     return _choice_letter(match.group(1)) if match else ""

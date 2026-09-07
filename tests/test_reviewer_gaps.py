@@ -136,7 +136,12 @@ try:
 finally:
     pdf_renderer._draw_tick, pdf_renderer._draw_number_in_circle = _real_tick, _real_circle
 
-print("== gap 4: the question total is written on the sheet ==")
+print("== gap 4: the question total belongs in the STRIP, not on the answer ==")
+# Reversed by the product owner after seeing a real Class 10 Physics copy: the sheet
+# carried a bold "Q4 1.5/3" printed across the student's own handwriting while the
+# margin strip beside it already read "Q4 1+0.5=1.5/3". "Why are these marks on the
+# student's answer? it should be on right margin strip." The sheet carries ticks,
+# crosses and circled STEP marks - the arithmetic and the total live in the strip.
 report4 = GradeReport(
     total_score=3, max_total=4, overall_remarks="x",
     questions=[QuestionMark(
@@ -156,9 +161,11 @@ page_text = out[0].get_text()
 sheet_only = " ".join(
     sp["text"] for b in out[0].get_text("dict")["blocks"] for l in b.get("lines", [])
     for sp in l["spans"] if sp["bbox"][0] < out[0].rect.width * 0.72)
-check("the question total appears ON the sheet, not only in the strip",
-      "3/4" in sheet_only, f"sheet text: {sheet_only!r}")
+check("the question total is NOT printed over the answer",
+      "3/4" not in sheet_only, f"sheet text: {sheet_only!r}")
 check("the strip still carries its own entry", "Q1" in page_text)
+check("and the total is still on the copy, in the strip",
+      "3/4" in page_text or "3 / 4" in page_text, page_text[:120])
 
 print("== every question that lost marks carries a reason ==")
 # From a real English copy: "Q3: 3.0 / 5.0" appeared with NO remark on the sheet and

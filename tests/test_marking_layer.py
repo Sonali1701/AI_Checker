@@ -6,9 +6,13 @@ Each case here is a defect measured on a real evaluated copy:
   P3  the strip printed "1+0+1+1=3/4" while only three marks were drawn, so the
       student counted three ticks against four terms and could not find the step
       that scored nothing. Four such terms on every copy examined.
-  P4  a question's total followed its BAND, which can run past the end of the
-      answer onto the next question's page. Page 11 of the Business Laws copy
-      read "3) b) Ans  5.5/6" — that was Q3.a's total, and Q3.b is out of 4.
+  P4  the question total is no longer written on the answer at all — it is printed
+      once, in the right-hand strip. On a Class 10 Physics copy the sheet carried a
+      bold "Q4 1.5/3" across the student's handwriting while the strip beside it
+      already read "Q4 1+0.5=1.5/3". (The original P4 defect — a total following its
+      BAND onto the next question's page, "3) b) Ans 5.5/6" on page 11 of the
+      Business Laws copy — cannot recur once nothing is drawn there. Where the STRIP
+      entry lands is covered by test_strip_layout.)
   P6  step marks drew at 8.6-9.1pt and whole-answer marks at 14.0-14.8pt, a 1.6x
       gap, with both appearing on one page of the Accounting copy.
   P7  two renderers, 532 lines, were unreachable and both still drew a tick on
@@ -95,33 +99,55 @@ check("no floating zero when the step was never anchored",
       [sp["text"].strip() for sp in reds(doc[0])])
 doc.close()
 
-print("== P4: the question total names its question ==")
+# The question TOTAL is printed in the right-hand strip only. It used to be written
+# on the answer as well, and on a real Class 10 Physics copy that put a bold
+# "Q4 1.5/3" across the student's handwriting while the strip beside it already read
+# "Q4 1+0.5=1.5/3". The sheet carries ticks, crosses and circled STEP marks; the
+# strip carries the arithmetic. Both halves are checked here so neither drifts back.
+def _content_edge(page):
+    """Where the answer ends and the marks strip begins. The strip is
+    max(0.24 x original, 175), so recover the original width from the widened one."""
+    total = page.rect.width
+    wide = total / 1.24
+    return wide if wide >= 175 / 0.24 else total - 175
+
+
+def on_sheet(page):
+    edge = _content_edge(page)
+    return [sp["text"].strip() for sp in reds(page) if sp["bbox"][0] < edge]
+
+
+def in_strip(page):
+    edge = _content_edge(page)
+    return [sp["text"].strip() for sp in reds(page) if sp["bbox"][0] >= edge]
+
+
+print("== P4: no question total is written on the answer ==")
 doc = sheet()
 ls = lines(1, [80.0, 140.0])
 render(doc, "Q3.a", 2, 3, [
     Criterion(description="a", awarded=1, max=1, met=True, evidence="", step_line_id="p1_l0"),
     Criterion(description="b", awarded=1, max=2, met=False, evidence="", step_line_id="p1_l1"),
 ], ls)
-texts = [sp["text"].strip() for sp in reds(doc[0])]
-total = [t for t in texts if "/" in t]
-check("the total is printed", bool(total), texts)
-check("and carries its question label", total and total[0].startswith("Q3.a"),
-      f"printed {total!r} — a bare '2/3' beside a heading reads as that heading's score")
+check("no 'n/m' total is drawn over the student's answer",
+      not [t for t in on_sheet(doc[0]) if "/" in t], on_sheet(doc[0]))
+check("the step marks themselves are still drawn",
+      {"1"} <= set(on_sheet(doc[0])), on_sheet(doc[0]))
 doc.close()
 
-print("== P4: the total stays on a page this question actually marked ==")
-# The band bleeds onto page 2, but every mark is on page 1. The total must not
-# follow the band across.
+print("== P4: nothing follows the band onto the next question's page ==")
+# The band bleeds onto page 2, but every mark is on page 1. The original defect was
+# the TOTAL following the band across; nothing is drawn there now, on either page.
 doc = sheet(2)
 ls = lines(1, [80.0, 140.0]) + lines(2, [60.0])
 render(doc, "Q3.a", 2, 3, [
     Criterion(description="a", awarded=1, max=1, met=True, evidence="", step_line_id="p1_l0"),
     Criterion(description="b", awarded=1, max=2, met=False, evidence="", step_line_id="p1_l1"),
 ], ls)
-p1 = [t["text"].strip() for t in reds(doc[0]) if "/" in t["text"]]
-p2 = [t["text"].strip() for t in reds(doc[1]) if "/" in t["text"]]
-check("the total is on the marked page", bool(p1), f"page1={p1}")
-check("and NOT on the page the band bled onto", not p2, f"page2={p2}")
+p1 = [t for t in on_sheet(doc[0]) if "/" in t]
+p2 = [t for t in on_sheet(doc[1]) if "/" in t]
+check("no total on the answer of the marked page", not p1, f"page1={p1}")
+check("and none on the page the band bled onto", not p2, f"page2={p2}")
 doc.close()
 
 print("== P6: one hand marks the sheet ==")
