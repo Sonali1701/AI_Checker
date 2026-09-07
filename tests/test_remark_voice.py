@@ -195,6 +195,20 @@ print("== a 1-mark part is not split into method and answer ==")
 # graded a second copy that DID show the magnification step at 1/1, so the tool was
 # also scoring the same correct answer two different ways.
 _np = build_system_prompt("Physics", "Class 10", "school")
+
+# ...but ONLY after the part is established as attempted at all. The same copy left
+# Q6(i) blank and wrote u = -30 inside part (ii)'s working, where it is an INPUT to
+# (ii), not an answer to (i). The tool credited it 0.5; relaxing the working rule
+# alone would have pushed that to a full mark for a blank part, so the blank test has
+# to run first.
+check("a labelled part left blank scores 0", "A labelled part left BLANK is unattempted" in _np)
+check("and that is settled before any partial credit",
+      _np.find("A labelled part left BLANK") < _np.find("no room for a separate method mark"))
+check("a value inside another part's working is not this part's answer",
+      "there it is an INPUT to that part" in _np)
+check("but parts answered together still count as attempted",
+      "a combined answer is attempted for every part it covers" in _np)
+
 check("the 1-mark exception is stated",
       "no room for a separate method mark" in _np)
 check("it names the full mark, not a fraction",
