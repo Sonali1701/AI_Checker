@@ -183,6 +183,79 @@ ys = sorted(d[3] for d in sheet)
 check("no two MCQ marks share a row",
       all(b - a > 12.0 for a, b in zip(ys, ys[1:])), [round(v, 1) for v in ys])
 
+# ------------------------------------------- marks must not collide with marks
+print()
+print("== a mark is never drawn through another mark ==")
+# The MCQ block that failed on BOTH new copies: three options of much the same
+# length, one under another. Every mark is therefore placed at much the same x,
+# and a tick runs 1.6*size tall against a ~28pt row pitch - so the tick for one
+# answer was drawn through the mark for the answer above it. MEASURED: on one copy
+# Q1's and Q2's ticks merged into a single 43x44pt blob, on the other Q1's cross
+# and Q2's tick merged into 45x55pt. A tick may sit on the student's WRITING - a
+# teacher's does - but two marks on top of each other say nothing at all.
+STACK = [
+    ("P1L1", "Ans 1. (D) 25 W", 150.0, 176.0),
+    ("P1L2", "Ans 2 (A) Vx > Vy", 178.0, 204.0),
+    ("P1L3", "Ans 3 (D) R is true", 206.0, 232.0),
+]
+ocr2 = [PageOCR(page=1, image_width=595, image_height=842, lines=[
+    LineBox(line_id=lid, text=t, bbox=(80.0, y0, 250.0, y1), page=1)
+    for lid, t, y0, y1 in STACK])]
+report2 = GradeReport(
+    total_score=2, max_total=3, overall_remarks="Two of three correct.",
+    section_totals=[{"qid": f"Q{i}", "score": s, "max_score": 1, "objective": True}
+                    for i, s in ((1, 1), (2, 0), (3, 1))],
+    questions=[
+        QuestionMark(qid="Q1", score=1, max_score=1, page=1, anchor_line_id="P1L1",
+                     y_fraction=0.18, remark="", objective=True, attempted=True,
+                     chosen_option="D", correct_option="D"),
+        QuestionMark(qid="Q2", score=0, max_score=1, page=1, anchor_line_id="P1L2",
+                     y_fraction=0.22, remark="Ans: A", objective=True, attempted=True,
+                     chosen_option="B", correct_option="A"),
+        QuestionMark(qid="Q3", score=1, max_score=1, page=1, anchor_line_id="P1L3",
+                     y_fraction=0.26, remark="", objective=True, attempted=True,
+                     chosen_option="D", correct_option="D"),
+    ])
+
+st2 = fitz.open()
+sp2 = st2.new_page(width=595, height=842)
+for lid, t, y0, y1 in STACK:
+    sp2.insert_text((80, y1 - 6), t, fontsize=12, color=(0.12, 0.14, 0.35))
+bytes2 = st2.tobytes()
+st2.close()
+
+drawn2 = []
+_tick2, _cross2 = pdf_renderer._draw_tick, pdf_renderer._draw_cross
+
+
+def _rec2(kind, real):
+    def wrapper(page, x, y, size=26, seed="", **kw):
+        if x < 595.0:                      # the answer lane, not the margin strip
+            box = (pdf_renderer._cross_box(x, y, size) if kind == "cross"
+                   else pdf_renderer._tick_box(x, y, size))
+            drawn2.append((kind, box))
+        return real(page, x, y, size=size, seed=seed, **kw)
+    return wrapper
+
+
+pdf_renderer._draw_tick = _rec2("tick", _tick2)
+pdf_renderer._draw_cross = _rec2("cross", _cross2)
+try:
+    build_evaluated_pdf(student_pdf_bytes=bytes2, student_filename="s.pdf",
+                        student_pngs=[], report=report2, ocr_pages=ocr2)
+finally:
+    pdf_renderer._draw_tick, pdf_renderer._draw_cross = _tick2, _cross2
+
+check("all three answers are still marked", len(drawn2) == 3,
+      f"{[k for k, _b in drawn2]}")
+clashes = [(a[0], b[0]) for i, a in enumerate(drawn2) for b in drawn2[i + 1:]
+           if a[1].intersects(b[1])]
+check("no mark overlaps another mark", not clashes,
+      f"{clashes}; boxes={[(k, tuple(round(v, 1) for v in b)) for k, b in drawn2]}")
+check("and every mark is still legible", 
+      all(b.height >= pdf_renderer._TICK_MIN_SIZE for _k, b in drawn2),
+      f"{[round(b.height, 1) for _k, b in drawn2]}")
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)} -> {FAILS}")

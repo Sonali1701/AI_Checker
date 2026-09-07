@@ -75,6 +75,58 @@ def _tick_capped_to_answer(size: float, anchor_lines: list) -> float:
     return min(size, max(_TICK_MIN_SIZE, span / _TICK_RISE))
 
 
+# Every mark already drawn on the answer, per page, so the next one can be kept
+# off it. Marks are the only thing here that must not collide with each other: they
+# may sit on the student's writing (a teacher's do), but two marks on top of one
+# another are unreadable and there is no way to tell which answer either scored.
+_MARK_BOXES: dict[int, list["fitz.Rect"]] = {}
+
+
+def _tick_box(x: float, y: float, size: float) -> "fitz.Rect":
+    """What _draw_tick actually covers: up and to the right of its anchor."""
+    return fitz.Rect(x, y - _TICK_RISE * size, x + 1.5 * size, y + 0.2 * size)
+
+
+def _cross_box(x: float, y: float, size: float) -> "fitz.Rect":
+    """_draw_cross is centred on its anchor."""
+    h = size / 2.0
+    return fitz.Rect(x - h, y - h, x + h, y + h)
+
+
+def _note_mark(page_no: int, box: "fitz.Rect") -> None:
+    _MARK_BOXES.setdefault(page_no, []).append(+box)
+
+
+def _fit_beside_marks(page_no: int, x: float, y: float, size: float,
+                      right_cap: float, *, cross: bool = False,
+                      ) -> tuple[float, float]:
+    """Shrink, then if need be slide, a mark clear of the ones already drawn.
+
+    Returns (size, x). Shrinking first because a smaller tick is still obviously a
+    tick, where a tick shunted 40pt to the right of its answer is a tick belonging
+    to nothing - the complaint this whole placement pass exists to answer.
+    """
+    boxes = _MARK_BOXES.get(page_no) or []
+    if not boxes:
+        return size, x
+
+    def hits(sz: float, xx: float) -> bool:
+        box = _cross_box(xx, y, sz) if cross else _tick_box(xx, y, sz)
+        return any(box.intersects(b) for b in boxes)
+
+    while size > _TICK_MIN_SIZE and hits(size, x):
+        size = max(_TICK_MIN_SIZE, size * 0.85)
+    if not hits(size, x):
+        return size, x
+    # Still buried at the smallest legible size: step right, past whatever it is
+    # sitting on, as long as the sheet has room for it there.
+    width = size if cross else 1.5 * size
+    for b in sorted(boxes, key=lambda r: r.x1):
+        if hits(size, x):
+            x = max(x, b.x1 + 6.0)
+    return size, min(x, max(2.0, right_cap - width))
+
+
 def _answer_length_scale(answer_lines: int) -> float:
     """How much a whole-answer tick grows with the length of the answer."""
     if not answer_lines or answer_lines <= 0:
@@ -2040,6 +2092,7 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             # been marked with a tick, and marks awarded, though a remark is given".
             if fully_earned:
                 _draw_tick(pg, tick_x, y_mark, size=tick_size, seed=sstep + "t")
+                _note_mark(pl["page"], _tick_box(tick_x, y_mark, tick_size))
                 marked_on_sheet = True
             elif zero_step:
                 # A point that earned NOTHING is wrong, and a teacher crosses it. It
@@ -2049,7 +2102,9 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
                 # point", and "the student's wrong point should be crossed/marked
                 # clearly... the evaluator should not leave all five attempted points
                 # appearing equally accepted".
-                _draw_cross(pg, tick_x, y_mark, size=tick_size * 0.85, seed=sstep + "x")
+                _draw_cross(pg, tick_x, y_mark, size=tick_size * 0.85,
+                            seed=sstep + "x")
+                _note_mark(pl["page"], _cross_box(tick_x, y_mark, tick_size * 0.85))
                 marked_on_sheet = True
             mark_x = tick_x + mark_dx
             _draw_number_in_circle(pg, mark_x, y_mark, mark_text,
@@ -2181,15 +2236,22 @@ def _render_question_marks(student_doc: fitz.Document, m, my_lines: list[dict],
             tick_x = max(2.0, min(x_end + 12, mark_right - 6 - cluster_w))
             if aw <= 1e-6:  # Zero marks
                 if not unattempted:   # attempted-but-wrong → cross; unattempted → nothing
-                    _draw_cross(mark_page, tick_x, y_mark, size=tick_size * 0.7,
-                                seed=seed)
+                    x_size = tick_size * 0.7
+                    x_size, tick_x = _fit_beside_marks(
+                        mark_page_num, tick_x, y_mark, x_size,
+                        mark_right - 6, cross=True)
+                    _draw_cross(mark_page, tick_x, y_mark, size=x_size, seed=seed)
+                    _note_mark(mark_page_num, _cross_box(tick_x, y_mark, x_size))
                     marked_on_sheet = True
             else:
                 # Same rule for a whole descriptive answer: tick only for full marks,
                 # otherwise the score alone. Half a mark with a tick beside it reads
                 # to a student as "this was right".
                 if mx > 0 and aw >= mx - 1e-6:
+                    tick_size, tick_x = _fit_beside_marks(
+                        mark_page_num, tick_x, y_mark, tick_size, mark_right - 6)
                     _draw_tick(mark_page, tick_x, y_mark, size=tick_size, seed=seed)
+                    _note_mark(mark_page_num, _tick_box(tick_x, y_mark, tick_size))
                     marked_on_sheet = True
                 # The authoritative score is already printed in the margin. Do not
                 # circle it over the student's final line, where it can obscure a
@@ -2895,6 +2957,7 @@ def _build_evaluated_pdf(student_pdf_bytes: bytes, student_filename: str,
     # inherit this one's ink masks and place its marks against the wrong page.
     # Safe because _RENDER_LOCK serialises builds, exactly as for _CONTENT_W.
     _MARK_INK.clear()
+    _MARK_BOXES.clear()
     _SHEET_RIGHT.clear()
     widened = fitz.open()
     for pno in range(len(student_doc)):
