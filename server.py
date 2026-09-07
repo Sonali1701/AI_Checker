@@ -76,7 +76,7 @@ APP_DIR = (
     else os.path.dirname(os.path.abspath(__file__))
 )
 STATIC_DIR = os.path.join(HERE, "static")
-BUILD_ID = "2026.09.07.1-teacher-marking-release"
+BUILD_ID = "2026.09.07.2-teacher-marking-release"
 API_PROTOCOL_VERSION = 5
 
 app = FastAPI(title="AI Copy Checker", version="3.2")
