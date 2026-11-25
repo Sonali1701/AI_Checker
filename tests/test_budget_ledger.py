@@ -21,22 +21,24 @@ def check(name, condition, detail=""):
 
 
 print("== commercial caps ==")
-check("school 50 marks is capped at Rs.15",
+# Department caps set by the operator on 2026-09-17: school Rs.12, CA/commerce
+# Rs.18, whatever the paper's total. The size of the paper picks the grader only.
+check("school 50 marks is capped at Rs.12",
       BudgetPolicy.for_copy(total_marks=50, exam_type="school",
-                            subject="Chemistry").cap_inr == 15)
-check("school 100 marks remains capped at Rs.15",
+                            subject="Chemistry").cap_inr == 12)
+check("school 100 marks remains capped at Rs.12",
       BudgetPolicy.for_copy(total_marks=100, exam_type="school",
-                            subject="Chemistry").cap_inr == 15)
-check("CA 50 marks is capped at Rs.15",
-      BudgetPolicy.for_copy(total_marks=50, exam_type="professional").cap_inr == 15)
-check("CA 100 marks is capped at Rs.20",
-      BudgetPolicy.for_copy(total_marks=100, exam_type="professional").cap_inr == 20)
-check("commerce 100 marks is capped at Rs.20 even when classed as school",
+                            subject="Chemistry").cap_inr == 12)
+check("CA 50 marks is capped at Rs.18",
+      BudgetPolicy.for_copy(total_marks=50, exam_type="professional").cap_inr == 18)
+check("CA 100 marks is capped at Rs.18",
+      BudgetPolicy.for_copy(total_marks=100, exam_type="professional").cap_inr == 18)
+check("commerce 100 marks is capped at Rs.18 even when classed as school",
       BudgetPolicy.for_copy(total_marks=100, exam_type="school",
-                            subject="Accountancy").cap_inr == 20)
-check("commerce 50 marks remains capped at Rs.15",
+                            subject="Accountancy").cap_inr == 18)
+check("commerce 50 marks is capped at Rs.18 too",
       BudgetPolicy.for_copy(total_marks=50, exam_type="school",
-                            subject="Business Studies").cap_inr == 15)
+                            subject="Business Studies").cap_inr == 18)
 for marks, exam_type, subject in (
     (100, "school", "Chemistry"),
     (50, "professional", "Advanced Mathematics"),

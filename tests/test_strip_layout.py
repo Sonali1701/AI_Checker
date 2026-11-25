@@ -193,12 +193,13 @@ _mcq_doc = fitz.open(stream=_mcq_pdf, filetype="pdf")
 _seen = []
 for _pno in range(_mcq_doc.page_count):
     _page = _mcq_doc[_pno]
-    _edge = _page.rect.width - 175
+    _edge = _page.rect.width - max(175, _W * .24)
     for _b in _page.get_text("dict")["blocks"]:
         for _l in _b.get("lines", []):
             for _sp in _l["spans"]:
                 _t = _sp["text"].strip()
-                if _sp["bbox"][0] >= _edge - 2 and _t.startswith("Q"):
+                if (_sp["bbox"][0] >= _edge and _t.startswith("Q")
+                        and _sp["bbox"][1] >= _page.rect.height - _H):
                     _seen.append((_pno, round(_sp["bbox"][1]), _t.split()[0]))
 _order = [q for _p, _y, q in sorted(_seen)]
 check("every MCQ verdict is on the page holding its answers",

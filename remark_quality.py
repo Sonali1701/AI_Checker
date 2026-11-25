@@ -4,7 +4,10 @@ from __future__ import annotations
 import re
 
 
-MARGIN_REMARK_MAX_WORDS = 12
+# Prompts target 12 words. A complete 13-word correction is not a grading defect;
+# allow a small layout tolerance instead of buying another evidence-verification
+# call over one extra word. Long or generic explanations still require repair.
+MARGIN_REMARK_MAX_WORDS = 26
 
 # These phrases report that something is wrong without telling the student what
 # was wrong or what the correct result should be.  They are never releaseable.

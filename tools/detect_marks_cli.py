@@ -44,7 +44,7 @@ def main() -> None:
 
     data = open(args.paper, "rb").read()
     cfg = cfg_from_request(
-        "gemini", args.model, args.subject,
+        "claude", args.model, args.subject,
         google_token=token,
         task_id=pw_access.new_task_id("detect-marks-cli"),
         student_class=args.student_class,

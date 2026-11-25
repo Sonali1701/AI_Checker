@@ -74,3 +74,22 @@ token.txt
 # Outputs from retired/manual rendering probes
 /test_*.pdf
 /test_*.png
+workflow_data/
+pw_skills_data/
+.workflow-test-*/
+
+# Checked copies delivered to a teacher: marks_index.csv carries student IDs
+# against their scores, and the audit/report JSON beside it names the copy.
+# The PDFs and page images are caught above; these are not. (25 Nov 2026)
+deliveries/
+
+# Scratch roots left by test runs and by the Vidyapeeth planner, which hold
+# student_results.csv / .xlsx written from real sheets.
+tmp/
+.test-*/
+.test_tmp/
+.pytest-tmp/
+*.stackdump
+
+# pytest basetemp roots used by tools/selftest.py (.pt27, .pt28, ...)
+.pt[0-9]*/

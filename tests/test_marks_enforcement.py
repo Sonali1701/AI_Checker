@@ -175,18 +175,16 @@ def _stub_grade(**kw):
     return GradeReport(total_score=25, max_total=27, overall_remarks="x", questions=[
         q("Q1", 25, 27, [crit("a", 25, 27)])])
 
-_saved = (_pipeline.gemini_grade, _pipeline.claude_grade, _pipeline.gemini_repair,
-          _pipeline.moderation_applies)
-_pipeline.gemini_grade = _stub_grade
+_saved = (_pipeline.claude_grade, _pipeline.claude_repair, _pipeline.moderation_applies)
 _pipeline.claude_grade = _stub_grade
 def _boom(*a, **k):
     raise RuntimeError("repair unavailable")
-_pipeline.gemini_repair = _boom
+_pipeline.claude_repair = _boom
 _pipeline.moderation_applies = lambda cfg, subject: False
 try:
     out = _pipeline.grade_prepared(
         qp_pngs=[], sa_pngs=[b"x"], ak_pngs=None, ak_text="key", marks_scheme=None,
-        cfg=_pipeline.ProviderConfig(model="gemini-2.5-flash", exam_type="school"),
+        cfg=_pipeline.ProviderConfig(exam_type="school"),
         filename="t.pdf", subject="Economics", use_mathpix=False, total_marks=25.0)
     rep = out["report"]
     check("wrong denominator is forced to the official total",
@@ -195,8 +193,7 @@ try:
     check("the rescale is disclosed", "proportional" in rep.overall_remarks,
           rep.overall_remarks[:120])
 finally:
-    (_pipeline.gemini_grade, _pipeline.claude_grade, _pipeline.gemini_repair,
-     _pipeline.moderation_applies) = _saved
+    (_pipeline.claude_grade, _pipeline.claude_repair, _pipeline.moderation_applies) = _saved
 
 print("== parse_repair drift tolerance ==")
 cases = {

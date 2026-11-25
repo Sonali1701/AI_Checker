@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Copy Checker — Handwritten Grader</title>
-  <link rel="stylesheet" href="/styles.css?v=2026.09.07.2" />
+  <link rel="stylesheet" href="/styles.css?v=2026.10.07.90" />
 </head>
 <body class="auth-locked">
   <div class="wrap">
@@ -14,6 +14,7 @@
       <div>
         <h1>AI Copy Checker</h1>
         <p>Automated handwritten answer-sheet evaluation</p>
+        <p><a href="/workflow.html">Open integrated workflow: assign → download → check → upload</a></p>
       </div>
     </header>
 
@@ -28,32 +29,87 @@
     <!-- Step 1 -->
     <section class="card">
       <div class="step"><span class="n">1</span><span class="t">Exam details</span></div>
-      <p class="sub">Level and subject guide the marking rules. The uploaded official files identify the exact exam package.</p>
+      <p class="sub">The exam category picks the marking rules (CA, commerce, school board, Vidyapeeth, design, teaching exams, School of Innovation or Gurukul). Level and subject refine them. The uploaded official files identify the exact exam package.</p>
       <div class="grid2">
-        <label>Class / CA level<input id="studentClass" type="text" placeholder="e.g. Class 10, CA Inter, CA Foundation" /></label>
-        <label>Subject<input id="subject" type="text" placeholder="e.g. Social Science, Advanced Accounting, Taxation" /></label>
-        <label>Exam type
-          <select id="examType">
-            <option value="">Auto-detect</option>
-            <option value="school">School / Board</option>
-            <option value="professional">Professional (CA / CMA / CS)</option>
+        <label>Exam category
+          <select id="paperType">
+            <option value="">Auto-detect from class and subject</option>
+            <option value="school">School board (CBSE, ICSE, ISC, state boards)</option>
+            <option value="vidyapeeth">PW Vidyapeeth (Radiant, Parishram and other batches)</option>
+            <option value="commerce">Commerce, Class 11 and 12</option>
+            <option value="ca">CA / CMA / CS</option>
+            <option value="design">Design and drawing (NID, NIFT, UCEED, NATA)</option>
+            <option value="teaching">Teaching exams (KVS, NVS, EMRS, TET)</option>
+            <option value="innovation">School of Innovation (tech and non-tech)</option>
+            <option value="gurukul">The Gurukulam School (PW Gurukul)</option>
           </select>
+          <span id="categoryHint" class="muted category-hint"></span>
         </label>
+        <div class="design-only muted design-note">Drawings are marked by vision against a rubric built from the paper. Every design copy goes to faculty review with its marked PDF until the marks are calibrated against faculty marks.</div>
+      </div>
+      <div class="grid2 written-only">
+        <label class="class-level">Class / CA level<input id="studentClass" type="text" placeholder="e.g. Class 10, CA Inter, CA Foundation" /></label>
+        <label class="vp-hide">Subject<input id="subject" type="text" placeholder="e.g. Social Science, Advanced Accounting, Taxation" /></label>
         <label>Paper total marks
           <input id="totalMarks" type="number" step="0.5" min="0.5" placeholder="e.g. 100" />
         </label>
+        <label class="vp-hide">Answer language
+          <select id="answerLanguage">
+            <option value="">Auto (English or Hindi)</option>
+            <option value="english">English</option>
+            <option value="hindi">Hindi</option>
+            <option value="marathi">Marathi</option>
+            <option value="gujarati">Gujarati</option>
+            <option value="bengali">Bengali</option>
+            <option value="tamil">Tamil</option>
+            <option value="telugu">Telugu</option>
+            <option value="urdu">Urdu</option>
+          </select>
+          <span id="languageHint" class="muted category-hint"></span>
+        </label>
+        <label>Step marking
+          <select id="leniency">
+            <option value="standard">Standard</option>
+            <option value="strict">Strict: a step earns marks only when complete and correct</option>
+            <option value="lenient">Lenient: a right idea earns its step, half for part right</option>
+          </select>
+        </label>
+      </div>
+      <div class="vidyapeeth-only vp-block">
+        <p class="muted">Batch header for the results sheet. Typed once here, these are used for every student in this upload; nothing is read from the covers for them. Every field is required.</p>
+        <div class="grid2">
+          <label>Board<select id="vpBoard" class="vp-field" data-list="boards"><option value="">Choose…</option></select></label>
+          <label>Vertical<select id="vpVertical" class="vp-field" data-list="verticals"><option value="">Choose…</option></select></label>
+          <label>Centre name<select id="vpCentre" class="vp-field" data-list="centres" data-other="1"><option value="">Choose…</option></select>
+            <input id="vpCentreOther" class="vp-other hidden" type="text" placeholder="Type the centre name" /></label>
+          <label>Course<select id="vpCourse" class="vp-field" data-list="courses" data-other="1"><option value="">Choose…</option></select>
+            <input id="vpCourseOther" class="vp-other hidden" type="text" placeholder="Type the course name" /></label>
+          <label>Class<select id="vpClass" class="vp-field" data-list="classes" data-prefix="Class "><option value="">Choose…</option></select></label>
+          <label>Subject<select id="vpSubject" class="vp-field" data-list="subjects" data-other="1"><option value="">Choose…</option></select>
+            <input id="vpSubjectOther" class="vp-other hidden" type="text" placeholder="Type the subject" /></label>
+          <label>Test name<input id="vpTestName" class="vp-field" type="text" placeholder="e.g. Infinity Test 10" /></label>
+          <label>Test date<input id="testDate" class="vp-field" type="date" /></label>
+          <label>Mode of paper<select id="vpMode" class="vp-field" data-list="modes"><option value="">Choose…</option></select></label>
+        </div>
+        <div class="vp-nav">
+          <button id="vpNext" type="button" class="primary-btn">Next: upload the files</button>
+          <span id="vpNextHint" class="muted"></span>
+        </div>
       </div>
     </section>
 
     <!-- Step 2 -->
-    <section class="card">
+    <section class="card later-step">
       <div class="step"><span class="n">2</span><span class="t">Upload files</span></div>
       <p class="sub">One question paper, and any number of student answer sheets to grade against it — add them all at once or a few at a time.</p>
       <div class="grid2">
-        <label>Official question paper (PDF/PNG/JPG) <span class="muted">— required</span>
+        <label>Official question paper (PDF/PNG/JPG) <span class="muted">— required</span><span class="design-only muted"> · the key and hints may be inside this same file</span>
           <input id="qpFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
+          <span>Question pages <span class="muted">(optional)</span></span>
+          <input id="questionPageRange" type="text" placeholder="e.g. 1-3, 5" aria-describedby="questionPagesHint" />
+          <span id="questionPagesHint" class="muted">Use PDF page numbers starting at 1. Leave blank to use the whole file.</span>
         </label>
-        <div>
+        <div id="uploadSheets">
           <span class="lbl">Student answer sheet(s)</span>
           <div id="dropzone" class="dropzone">
             <input id="saFiles" type="file" accept=".pdf,.png,.jpg,.jpeg" multiple hidden />
@@ -69,18 +125,52 @@
         </div>
         <ul id="sheetList" class="sheetlist"></ul>
       </div>
+      <div class="radios written-only sheet-source">
+        <label><input type="radio" name="sheetSource" value="upload" checked /> Upload answer sheets (about 60 at a time)</label>
+        <label><input type="radio" name="sheetSource" value="folder" /> Grade a whole folder on this computer (thousands of copies, can resume)</label>
+      </div>
+      <div id="folderPanel" class="folder-panel hidden">
+        <label>Answer-sheet folder
+          <input id="bulkInput" type="text" placeholder="Paste the folder path, e.g. D:\Copies\Parishram 6 Sept" />
+        </label>
+        <label>Save evaluated copies to <span class="muted">(optional)</span>
+          <input id="bulkOutput" type="text" placeholder="Leave empty to use a new folder next to it, named “… - evaluated”" />
+        </label>
+        <div class="grid3">
+          <label>This computer is number<input id="bulkMachine" type="number" min="1" value="1" /></label>
+          <label>Out of how many computers<input id="bulkMachines" type="number" min="1" value="1" /></label>
+          <label>Copies at a time <span class="muted">(up to 30)</span><input id="bulkWorkers" type="number" min="1" max="30" value="20" /></label>
+        </div>
+        <button id="bulkCheck" class="ghost-btn" type="button">🔎 Check folder</button>
+        <div id="bulkPreview" class="muted"></div>
+        <p class="muted">Subfolders are included. Grade one folder at a time: two folders at once share this computer and finish no sooner. Keep this computer awake and this window open while it runs. You can stop at any time: press Start again with the same folders and finished copies are skipped, failed ones are tried again. To share a batch, give every computer the same folders (for example a shared Drive folder) and a different number.</p>
+      </div>
     </section>
 
     <!-- Step 3 -->
-    <section class="card">
+    <section class="card later-step">
       <div class="step"><span class="n">3</span><span class="t">Answer key</span></div>
-      <p class="sub">Automatic release requires the official, text-readable marking scheme. AI generation is draft-only.</p>
-      <div class="radios">
+      <p class="sub written-only">Automatic release requires the official, text-readable marking scheme. AI generation is draft-only.</p>
+      <p class="sub design-only">Optional. Upload the answer key or hints only when they are a separate file from the question paper.</p>
+      <div class="radios written-only">
         <label><input type="radio" name="keySource" value="upload" checked /> Upload answer key / rubric file</label>
         <label><input type="radio" name="keySource" value="rubric" /> Generate draft rubric (cannot be released)</label>
+        <label class="key-optional-only"><input type="radio" name="keySource" value="generate" /> No answer key: the tool writes a model answer key from the question paper, and saves it with the results</label>
       </div>
       <div id="keyUpload">
-        <input id="akFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
+        <div class="radios"><label><input id="useQuestionPaperAsKey" type="checkbox" /> Question paper and answer key are in the same PDF</label></div>
+        <label id="separateKeyFile">Official answer key / marking scheme
+          <input id="akFile" type="file" accept=".pdf,.png,.jpg,.jpeg" />
+        </label>
+        <label>Answer pages <span class="muted">(optional)</span>
+          <input id="answerPageRange" type="text" placeholder="e.g. 4-8" aria-describedby="answerPagesHint" />
+        </label>
+        <p id="answerPagesHint" class="muted">Use PDF page numbers starting at 1. With a combined PDF, these pages come from the question paper upload. Leave blank to use the whole file.</p>
+        <details class="written-only">
+          <summary>Step marking rules (optional)</summary>
+          <p class="sub">Explicit step marks are read from the key where possible. Upload a reviewed JSON rubric to fix partial-credit rules for this paper. <a href="/step-rubric-example.json" download>Download example</a></p>
+          <input id="stepRubricFile" type="file" accept=".json,application/json" />
+        </details>
       </div>
       <div id="keyRubric" class="hidden">
         <button id="genRubric" class="ghost-btn" type="button">✨ Generate rubric from question paper</button>
@@ -88,10 +178,23 @@
       </div>
     </section>
 
+    <!-- Step 4 (design papers) -->
+    <section class="card design-only later-step">
+      <div class="step"><span class="n">4</span><span class="t">Questions and marks</span></div>
+      <p class="sub">Design papers rarely print the marks. Read the questions from the paper, then type the marks for each one. The same rubric is used for every copy in the batch.</p>
+      <button id="readDesignPaper" class="ghost-btn" type="button">📐 Read questions from the paper</button>
+      <div id="designMethod" class="muted"></div>
+      <table id="designTable" class="marks hidden">
+        <thead><tr><th>Question</th><th>Marks</th><th>What is asked, and how the marks are split</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div><span class="locked">Total: <b id="designTotal">0</b></span></div>
+    </section>
+
     <!-- Step 4 -->
-    <section class="card">
+    <section class="card written-only later-step">
       <div class="step"><span class="n">4</span><span class="t">Maximum marks (denominator)</span></div>
-      <p class="sub">Read from the official paper and locked. If deterministic reading is unavailable, Claude and Gemini must independently agree.</p>
+      <p class="sub">Read from the official paper and locked. If deterministic reading is unavailable, Claude reads it once and it must match the paper total.</p>
       <button id="detectMarks" class="ghost-btn" type="button">🔢 Detect &amp; verify max marks</button>
       <div id="marksMethod" class="muted"></div>
       <table id="marksTable" class="marks hidden">
@@ -105,13 +208,14 @@
     </section>
 
     <!-- Step 5 -->
-    <section class="card">
+    <section class="card later-step">
       <div class="step"><span class="n">5</span><span class="t">Evaluate</span></div>
       <ul id="checklist" class="checklist"></ul>
       <button id="evaluate" class="primary-btn" type="button" disabled>🚀 Evaluate</button>
       <div id="progress" class="progress hidden">
         <div class="bar"><div id="barFill" class="fill"></div></div>
         <div id="progressText" class="muted"></div>
+        <button id="bulkStop" class="ghost-btn small hidden" type="button">⏹ Stop after the copies in progress</button>
       </div>
     </section>
 
@@ -133,6 +237,6 @@
 
   <div id="toast" class="toast hidden"></div>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="/app.js?v=2026.09.07.2"></script>
+  <script src="/app.js?v=2026.10.07.90"></script>
 </body>
 </html>

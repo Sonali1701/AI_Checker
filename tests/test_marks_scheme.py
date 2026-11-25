@@ -108,7 +108,9 @@ for _cls, _exam in (("Class 12", "school"), ("CA Inter", "professional")):
     check(f"{_exam} total includes all offered alternatives",
           "INCLUDING all alternatives" in _p)
     check(f"{_exam} prompt still enumerates compulsory sub-parts",
-          "Enumerate EVERY sub-part separately" in _p)
+          "Enumerate every SEPARATELY MARKED part" in _p)
+    check(f"{_exam} prompt does not duplicate a shared roman-clause allocation",
+          "SHARED total" in _p and "never 5 for each clause" in _p)
 
 print("== the arithmetic that was actually wrong ==")
 PAPER = {"Q1": 5, "Q2": 5, "Q3": 5, "Q4": 5, "Q5": 16,
@@ -175,7 +177,8 @@ print()
 print("== but nothing genuinely missing is invented ==")
 named = json.dumps({"items": ITEMS, "choice_groups": [{
     "group_id": "choice-q2", "options": [
-        {"option_id": "a", "question_ids": ["Q2.a", "Q2.b"]}],
+        {"option_id": "a", "question_ids": ["Q2.a", "Q2.b"]},
+        {"option_id": "b", "question_ids": ["Q3.a", "Q3.b"]}],
     "select_count": 1, "contribution_marks": 10}]})
 check("a well-formed group keeps its own id",
       parse_strict_marks_scheme(named).choice_groups[0].group_id == "choice-q2")
@@ -187,7 +190,13 @@ def refuses(raw):
     except Exception:
         return True
 
-check("an option naming question_ids but no id is still refused",
+unlabelled = json.loads(named)
+for option in unlabelled["choice_groups"][0]["options"]:
+    del option["option_id"]
+check("non-scoring option labels are generated without changing memberships",
+      [o.question_ids for o in parse_strict_marks_scheme(json.dumps(unlabelled)).choice_groups[0].options]
+      == [["Q2.a", "Q2.b"], ["Q3.a", "Q3.b"]])
+check("a choice with only one alternative is still refused",
       refuses(json.dumps({"items": ITEMS, "choice_groups": [{
           "options": [{"question_ids": ["Q2.a"]}],
           "select_count": 1, "contribution_marks": 10}]})))

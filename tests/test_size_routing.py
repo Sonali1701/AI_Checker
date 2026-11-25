@@ -59,8 +59,11 @@ check("claude + 25 marks -> sonnet",
       cfg(25, provider="claude").model == _BUDGET_GRADING_MODEL)
 
 print("== an explicitly requested model still wins over size ==")
-check("explicit model is never overridden",
-      cfg(100, model="gemini-2.5-flash").model == "gemini-2.5-flash")
+check("explicit Claude model is never overridden",
+      cfg(100, model="claude-opus-4-8").model == "claude-opus-4-8")
+check("a Gemini model id is ignored: Gemini is switched off",
+      cfg(100, model="gemini-2.5-flash").model == _LARGE_PAPER_GRADING_MODEL
+      and cfg(100, model="gemini-2.5-flash").provider == "claude")
 
 print("== school papers route by size even though their cap remains Rs.15 ==")
 check("a 100-mark school paper gets the lower-cost large-paper grader",
@@ -109,8 +112,9 @@ _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app_js = open(os.path.join(_root, "static", "app.js"), encoding="utf-8").read()
 check("commonForm() appends total_marks",
       re.search(r'fd\.append\("total_marks"', app_js) is not None)
+evaluate_body = re.search(r'async function evaluate\(\)\s*\{([\s\S]*?)\n\}', app_js)
 check("the evaluate call is built from commonForm()",
-      re.search(r'async function evaluate\(\)[\s\S]{0,400}?commonForm\(\)', app_js) is not None)
+      evaluate_body is not None and 'const fd = commonForm();' in evaluate_body.group(1))
 # And the server must forward it into routing rather than only using it for the total.
 server_py = open(os.path.join(_root, "server.py"), encoding="utf-8").read()
 check("server passes total_marks into cfg_from_request",

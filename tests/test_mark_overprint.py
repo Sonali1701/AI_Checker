@@ -22,12 +22,12 @@ import fitz
 from grader import (Criterion, GradeReport, QuestionMark,  # noqa: E402
                     pdf_or_image_to_pngs)
 from mathpix import LineBox, PageOCR  # noqa: E402
-from pdf_renderer import build_evaluated_pdf  # noqa: E402
+from pdf_renderer import build_evaluated_pdf, STRIP_MIN_WIDTH, STRIP_FRACTION  # noqa: E402
 
 FAILS = []
 SHEET_W, SHEET_H = 600.0, 800.0
 OCR_W, OCR_H = 1500, 2000
-STRIP_X = SHEET_W          # marks past this are in the margin lane, not on the answer
+STRIP_X = max(STRIP_MIN_WIDTH, SHEET_W * STRIP_FRACTION)  # student content starts after the left strip
 
 
 def check(name, condition, detail=""):
@@ -78,16 +78,28 @@ def mark_clusters(pdf_bytes):
                     and colour[1] < 0.4 and colour[2] < 0.4):
                 continue
             rect = drawing["rect"]
-            if rect.x0 >= STRIP_X or rect.width > 300 or rect.height > 300:
+            if (rect.x0 < STRIP_X or rect.y0 < doc[i].rect.height - SHEET_H
+                    or rect.width > 300 or rect.height > 300):
                 continue
             points.append((i, (rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2))
     doc.close()
 
+    # How close two STROKES have to be to be one mark. A tick is a run of ~16
+    # sub-segments about 1.5pt apart, so anything well above that groups a tick
+    # correctly; the ceiling is how far apart two different marks get.
+    #
+    # This was 18, which was fine only while the renderer forced a flat 30pt between
+    # marks - a gap wider than the line pitch of ordinary handwriting, and the reason
+    # step marks used to walk down off the answer instead of sitting on their lines.
+    # Now that a step mark sits on its own line, ticks one 24pt row apart are ~22pt
+    # apart and an 18pt radius chained four of them into one "mark". The instrument
+    # was measuring the defect, not the marks.
+    CLUSTER_R = 8.0
     clusters = []
     for point in points:
         near = [c for c in clusters
                 if any(q[0] == point[0]
-                       and (q[1] - point[1]) ** 2 + (q[2] - point[2]) ** 2 < 18 ** 2
+                       and (q[1] - point[1]) ** 2 + (q[2] - point[2]) ** 2 < CLUSTER_R ** 2
                        for q in c)]
         merged = [point]
         for c in near:

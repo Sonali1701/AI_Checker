@@ -10,6 +10,9 @@ import math
 import os
 from dataclasses import dataclass, field
 
+import categories
+from categories import subjects as _subjects
+
 # ---------------------------------------------------------------------------
 # PRICING — USD per 1,000,000 tokens. Update here when rates change.
 #   Gemini:  https://ai.google.dev/gemini-api/docs/pricing
@@ -59,6 +62,15 @@ PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4":     _claude(5.00, 25.00),
     "claude-sonnet-4":   _claude(3.00, 15.00),
     "claude-haiku-4":    _claude(1.00, 5.00),
+    # --- OpenAI (through the PW proxy's /api/gpt/generate, kit of 2026-09-17) ---
+    # List prices per MTok after the 2026-07-30 cut; cached input bills at 10%
+    # automatically for a repeated prefix, there is no cache write charge. Sol is
+    # on a $4/$20 promotion until at least 2026-11-21; the list rate is used so the
+    # budget never under-quotes it. Deployment ids carry a suffix
+    # ("gpt-5.6-terra-ard-content"), matched here by substring.
+    "gpt-5.6-luna":  {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    "gpt-5.6-terra": {"input": 2.00, "cached_input": 0.20, "output": 12.00},
+    "gpt-5.6-sol":   {"input": 5.00, "cached_input": 0.50, "output": 30.00},
 }
 
 # Mathpix Convert API (incl. /v3/text): USD per page/image processed (PAYG, 0–1M pages).
@@ -229,41 +241,46 @@ def record_usage_event(target: dict | None, event: dict | None, *, stage: str) -
 
 
 # --- Per-copy budget -------------------------------------------------------
-# The department-aware commercial contract, in rupees:
-#   school, non-commerce (any total)       -> Rs.15
-#   CA/professional or commerce, <=50      -> Rs.15
-#   CA/professional or commerce, >50       -> Rs.20
+# The department-aware commercial contract, in rupees (set by the operator on
+# 2026-09-17: "school copies take 10-12 Rs and CA copies take 15-18 Rs"):
+#   school, non-commerce (any total)       -> Rs.12
+#   CA/professional or commerce (any total)-> Rs.18
+# The paper's size no longer moves the cap; it still picks the primary grader
+# (pipeline._LARGE_PAPER_MARKS).
 #
 # Keep classification and the cap calculation here. BudgetPolicy, the server,
 # pipeline release checks, and measurement tools all call budget_for() instead of
 # carrying local copies of this table.
 BUDGET_SPLIT_MARKS = 50.0
-BUDGET_INR_SMALL = 15.0
-BUDGET_INR_LARGE = 20.0
+BUDGET_INR_SCHOOL = 12.0
+BUDGET_INR_PROFESSIONAL = 18.0
+# Older names, kept for tools that import them: the small tier is the school cap,
+# the large tier the CA/commerce cap.
+BUDGET_INR_SMALL = BUDGET_INR_SCHOOL
+BUDGET_INR_LARGE = BUDGET_INR_PROFESSIONAL
 
 
 _PROFESSIONAL_EXAM_TYPES = frozenset({
     "professional", "ca", "cma", "cs", "chartered accountancy",
 })
-_COMMERCE_SUBJECT_HINTS = (
-    "account", "audit", "banking", "business", "commerce", "corporate",
-    "cost", "econom", "entrepreneur", "finance", "financial", "gst",
-    "insurance", "law", "management", "marketing", "secretarial", "tax",
-)
+# The list lives in categories/subjects.py (one subject axis for the app).
+_COMMERCE_SUBJECT_HINTS = _subjects.COST_COMMERCE_HINTS
 
 
 def is_professional_or_commerce(*, exam_type: str = "", subject: str = "") -> bool:
-    """Whether a paper belongs to the department that gets the Rs.20 large-paper tier."""
+    """Whether a paper belongs to the CA/commerce department (the Rs.18 tier)."""
     normalized_exam = " ".join(str(exam_type or "").strip().lower().split())
     if normalized_exam in _PROFESSIONAL_EXAM_TYPES:
         return True
-    normalized_subject = " ".join(str(subject or "").strip().lower().split())
-    return any(hint in normalized_subject for hint in _COMMERCE_SUBJECT_HINTS)
+    return _subjects.is_cost_commerce_subject(subject)
 
 
 def budget_for(total_marks: float | None, *, exam_type: str = "",
-               subject: str = "") -> float:
-    """Return the single authoritative per-copy provider-cost ceiling.
+               subject: str = "", category: str = "") -> float:
+    """Return the per-copy ceiling in rupees for this paper's department.
+
+    The desktop app enforces it (server.ENFORCE_GRADING_BUDGET) since 2026-09-17,
+    when the second examiner moved to the proxy's ChatGPT deployments to fit it.
 
     AICHECKER_BUDGET_INR overrides it for the whole process. The ceiling is a
     commercial decision, not an engineering one, and it is currently what sets the
@@ -285,9 +302,11 @@ def budget_for(total_marks: float | None, *, exam_type: str = "",
         marks = float(total_marks) if total_marks is not None else None
     except (TypeError, ValueError):
         marks = None
-    large_department = is_professional_or_commerce(
-        exam_type=exam_type, subject=subject)
-    if (large_department and marks is not None and math.isfinite(marks)
-            and marks > BUDGET_SPLIT_MARKS):
-        return BUDGET_INR_LARGE
-    return BUDGET_INR_SMALL
+    del marks  # the size of the paper picks the grader, not the ceiling
+    if category:
+        # The exam category's ceiling (categories/<id>.py), still raised to the
+        # commerce tier for a school paper in a commerce subject.
+        return categories.budget_inr(categories.get(category), subject)
+    if is_professional_or_commerce(exam_type=exam_type, subject=subject):
+        return BUDGET_INR_PROFESSIONAL
+    return BUDGET_INR_SCHOOL

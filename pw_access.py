@@ -23,11 +23,57 @@ session pass, so long runs do not fail just because Google's token expires.
 import hashlib
 import os
 import random
+import threading
 import time
 import uuid
+from http.cookiejar import DefaultCookiePolicy
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+# MEASURED 2026-10-06 (build 83, three folder runs at once, 75 copies at a time):
+# 110 TLS handshakes cut short (SSLEOFError), 104 connection resets and failed DNS
+# look-ups, and not one 429 or 529. requests.post opened a new connection, with its
+# own DNS look-up and TLS handshake, for every call, so a laptop marking 75 copies
+# opened hundreds at once. One pooled session per process keeps connections open
+# and reuses them.
+_POOL_CONNECTIONS = 64
+# A connection that could not be opened (DNS, refused, connect timeout) never carried
+# the request, so it is retried here for every call, paid or not. Anything after the
+# request may have been sent keeps the callers' own rules (_post: retry_network only).
+_CONNECT_RETRIES = 3
+_SESSION: Optional[requests.Session] = None
+_SESSION_LOCK = threading.Lock()
+
+
+def _session() -> requests.Session:
+    """This process's pooled session (a worker process makes its own)."""
+    global _SESSION
+    with _SESSION_LOCK:
+        if _SESSION is None:
+            session = requests.Session()
+            # Calls for different signed-in users share the pool, never cookies.
+            session.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+            adapter = HTTPAdapter(
+                pool_connections=4, pool_maxsize=_POOL_CONNECTIONS,
+                max_retries=Retry(total=_CONNECT_RETRIES, connect=_CONNECT_RETRIES,
+                                  read=0, status=0, other=0, redirect=0,
+                                  backoff_factor=0.5, raise_on_status=False))
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            _SESSION = session
+        return _SESSION
+
+
+def _http_post(url: str, **kwargs):
+    return _session().post(url, **kwargs)
+
+
+def _http_put(url: str, **kwargs):
+    return _session().put(url, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +92,13 @@ _LARGE_REQUEST_BYTES = 3_500_000
 
 class PWAccessError(Exception):
     """Raised when a paid proxy/provider call fails."""
+
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 retry_after: float | None = None, provider: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.provider = provider
 
 
 def new_task_id(prefix: str = "task") -> str:
@@ -84,7 +137,7 @@ def _auth_token(google_token, force_new: bool = False) -> str:
         return session["token"]
 
     try:
-        r = requests.post(
+        r = _http_post(
             f"{PROXY_BASE_URL}/api/session",
             headers=_headers(g),
             json={},
@@ -102,6 +155,20 @@ def _auth_token(google_token, force_new: bool = False) -> str:
     except Exception:
         pass
     return g
+
+
+def session_pass_expiry(google_token) -> float:
+    """Mint (or reuse) this user's 7-day proxy pass and return when it expires.
+
+    Unix seconds; 0.0 when the proxy issued no pass (the Google token is then the
+    only credential and lasts its usual hour). The local app's sign-in endpoint
+    calls this while the Google token is fresh, so its own session can live as
+    long as the pass does.
+    """
+    g = _resolve_token(google_token)
+    _auth_token(g)
+    cache_key = hashlib.sha256(str(g or "").encode("utf-8")).hexdigest()
+    return float(_sessions.get(cache_key, {}).get("expiry") or 0.0)
 
 
 # Paid calls are retried only when the proxy explicitly says they were rejected before
@@ -161,7 +228,7 @@ def _backoff_seconds(r, attempt: int) -> float:
 
 def _post_once(path: str, google_token, payload: Dict[str, Any], timeout: int,
                force_new: bool = False):
-    return requests.post(
+    return _http_post(
         f"{PROXY_BASE_URL}{path}",
         headers=_headers(_auth_token(google_token, force_new=force_new)),
         json=payload,
@@ -371,9 +438,20 @@ def _raise_proxy_error(name: str, r) -> None:
         raise PWAccessError(
             f"The {name} model {what} and did not recover after "
             f"{_RETRY_ATTEMPTS} attempts. Nothing is wrong with this copy — "
-            f"re-run it in a few minutes."
+            f"re-run it in a few minutes.",
+            status_code=r.status_code, retry_after=_retry_after(r), provider=name,
         )
-    raise PWAccessError(f"{name} proxy error {r.status_code}: {r.text[:300]}")
+    raise PWAccessError(f"{name} proxy error {r.status_code}: {r.text[:300]}",
+                        status_code=r.status_code, provider=name)
+
+
+class _BlobUnavailable(Exception):
+    """Blob storage answered 5xx: nothing ran and nothing was billed, so retry."""
+
+
+# MEASURED 2026-10-06 (live CA check, build 84): "claude upload error 503: Blob service
+# is currently unavailable. Please try again." failed a Business Laws copy outright.
+_BLOB_RETRY_STATUSES = frozenset((500, 502, 503, 504))
 
 
 def _upload_large_json(google_token, app: str, request: dict, provider_name: str) -> str:
@@ -392,23 +470,30 @@ def _upload_large_json(google_token, app: str, request: dict, provider_name: str
         try:
             up = _post("/api/gemini/upload-url", google_token, {"app": app}, _TIMEOUT,
                        retry_network=True)
+            if up.status_code in _BLOB_RETRY_STATUSES:
+                raise _BlobUnavailable(
+                    f"{provider_name} upload-url error {up.status_code}: {up.text[:300]}")
             if up.status_code != 200:
                 raise PWAccessError(
                     f"{provider_name} upload-url error {up.status_code}: {up.text[:300]}")
 
-            pr = requests.put(
+            pr = _http_put(
                 up.json()["upload_url"],
                 data=request_bytes,
                 headers={"Content-Type": "application/json"},
                 timeout=_AI_TIMEOUT,
             )
+            if pr.status_code in _BLOB_RETRY_STATUSES:
+                raise _BlobUnavailable(
+                    f"{provider_name} upload error {pr.status_code}: {pr.text[:300]}")
             if pr.status_code != 200:
                 raise PWAccessError(
                     f"{provider_name} upload error {pr.status_code}: {pr.text[:300]}")
             return pr.json().get("url", "")
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
-                requests.exceptions.ChunkedEncodingError) as exc:
+                requests.exceptions.ChunkedEncodingError,
+                _BlobUnavailable) as exc:
             last_exc = exc
             if attempt >= _RETRY_ATTEMPTS - 1:
                 break
@@ -594,6 +679,48 @@ def claude_generate(
 
     r = _post("/api/claude/generate", google_token, payload, _AI_TIMEOUT)
     _raise_proxy_error("claude", r)
+    return _unwrap_provider_response(r.json())
+
+
+def gpt_generate(
+    google_token,
+    *,
+    model: str,
+    request: dict,
+    filename: str = "",
+    input_unit: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call a ChatGPT model through the proxy (pw-app-kit, 2026-09-17).
+
+    `request` is a native OpenAI chat.completions body and is sent through
+    unchanged. Images go in as base64 data URLs in the usual OpenAI content-part
+    form. Deployments the kit lists: gpt-5.6-luna-ard-content,
+    gpt-5.6-terra-ard-content, gpt-5.6-sol-ard-content; what is live is
+    GET /api/gpt/models. Same retry, blob-upload and envelope handling as the
+    Claude route, so a capacity rejection or a wrapped reply reads the same way.
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "request": request,
+        "filename": filename,
+        "input_unit": input_unit,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    blob_url = _upload_large_json(google_token, payload["app"], request, "gpt")
+    if blob_url:
+        payload.pop("request")
+        payload["request_blob_url"] = blob_url
+
+    r = _post("/api/gpt/generate", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt", r)
     return _unwrap_provider_response(r.json())
 
 

@@ -47,6 +47,12 @@ import fitz
 
 import grader
 import pdf_renderer as pr
+
+# A legacy-contract suite: marks stay inside the sheet and within reach of their
+# evidence row, and checking plans are drawn. The teacher layout (the product
+# default) has its own contract in test_teacher_layout.py.
+import pdf_renderer as _pr
+_pr.TEACHER_LAYOUT = False
 from grader import Criterion, QuestionMark
 from preflight import _is_red, _rgb, check_copy
 
@@ -272,6 +278,16 @@ check("a step that is not about citation is left alone",
       not _check_citation_credit(
           _R([_q("Q1.a.i", "Correct conclusion: valid", 0.5, 0.5, "P1L13")]),
           _NO_SECTION))
+# PW Skills live run, 12 Nov 2026: an HTML paper's step "<section> for product listing",
+# paid in full, was held as a provision credited without a section.
+check("an HTML <section> tag is not a provision",
+      not _check_citation_credit(
+          _R([_q("Q8", "<section> for product listing", 3, 3, "P1L13")]),
+          _NO_SECTION))
+check("a provision step that also names a tag is still checked",
+      len(_check_citation_credit(
+          _R([_q("Q1", "<b>Correct provision cited</b> (S.10 ICA)", 0.5, 0.5, "P1L13")]),
+          _NO_SECTION)) == 1)
 check("no OCR means no such check",
       not _check_citation_credit(
           _R([_q("Q1.a.i", "Correct provision cited (S.10 ICA)", 0.5, 0.5, "P1L13")]),
@@ -391,21 +407,23 @@ _rep3 = _G3(total_score=9, max_total=11, overall_remarks="x",
 _notes = enforce_evidence_against_awards(_rep3, _NO_SEC)
 _by3 = {q.qid: q for q in _rep3.questions}
 
-check("Q1a(i) comes down to the conclusion alone", _by3["Q1.a.i"].score == 0.5,
-      f"{_by3['Q1.a.i'].score} — the reviewer ruled maximum 0.5/2")
-check("the invented citation is the step that lost it",
-      _by3["Q1.a.i"].criteria[0].awarded == 0)
-check("and the reasoning built on it falls with it",
-      _by3["Q1.a.i"].criteria[2].awarded == 0)
-check("but the correct conclusion still stands",
-      _by3["Q1.a.i"].criteria[1].awarded == 0.5)
+# SME ruling on the CA batch, 2026-09-23: "in CA marks are not deducted for a missing
+# section number or article number". Code no longer zeroes a provision step because
+# no section NUMBER is on the page. A provision wrong in SUBSTANCE (this student's
+# self-contradictory reason) is the grader's call under the wrong-provision rule.
+check("a missing section number costs nothing in code", _by3["Q1.a.i"].score == 1.5,
+      f"{_by3['Q1.a.i'].score}")
+check("the provision step keeps its credit", _by3["Q1.a.i"].criteria[0].awarded == 0.5)
+check("and the reasoning keeps its credit", _by3["Q1.a.i"].criteria[2].awarded == 0.5)
+check("and the conclusion stands", _by3["Q1.a.i"].criteria[1].awarded == 0.5)
 check("Q3b's unmentioned right earns nothing, so it can be crossed",
       _by3["Q3.b"].criteria[0].awarded == 0 and _by3["Q3.b"].score == 3.0)
 check("a step the remark does NOT name keeps its marks",
       _by3["Q2.c.i"].score == 3.0, f"{_by3['Q2.c.i'].score}")
 check("a section the student really cited is still paid",
       _by3["Q1.a.ii"].score == 1.0)
-check("every change is reported", len(_notes) >= 3, f"{_notes}")
+check("every change is reported", len(_notes) >= 1 and all("Q1.a.i" not in n for n in _notes),
+      f"{_notes}")
 check("nothing happens without OCR to check against",
       enforce_evidence_against_awards(
           _G3(total_score=1, max_total=1, overall_remarks="x",
@@ -455,7 +473,11 @@ finally:
 
 check("both elements that earned nothing are crossed", len(_x2) == 2,
       f"{len(_x2)} crosses — a zero element left uncrossed reads as accepted")
-check("a part-marked answer is not ticked", len(_t2) == 0, f"{len(_t2)} ticks")
+# Since 2026-10-07 (tests/test_partial_credit_glyphs.py) positive partial credit
+# uses the same single tick as full credit; its circled award and the reason
+# in the margin say what was lost. An attempted zero is a cross.
+check("a part-marked answer carries one tick with its circled score", len(_t2) == 1,
+      f"{len(_t2)} ticks")
 
 # A fully correct single-mark answer keeps its tick and gains no crosses.
 _t3, _x3 = [], []

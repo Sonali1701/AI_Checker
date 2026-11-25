@@ -58,9 +58,11 @@ check("case and padding do not change the verdict",
 
 print()
 print("== a margin remark reprinted on the cover stays one sentence ==")
+# No dashes on anything a student reads (the reviewer's rule, 2026-09-16): the
+# clauses join with a comma and the second one continues in lower case.
 check("clauses are joined, not left to be split into orphans",
       cover_point("Definition omits. Just says 'with manager'.")
-      == "Definition omits - Just says 'with manager'")
+      == "Definition omits, just says 'with manager'")
 check("a single-clause remark is untouched",
       cover_point("Interest omitted") == "Interest omitted")
 check("an empty remark stays empty", cover_point("") == "")

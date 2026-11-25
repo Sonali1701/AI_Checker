@@ -20,11 +20,72 @@ import secrets
 from typing import Literal
 
 from pydantic import BaseModel, Field
+from categories import subjects as _subjects
+from choice_graph import ChoiceGraphError, build_choice_forest
 
 
 SCHEMA_VERSION = "2.0"
 QUESTION_GRAPH_PROOF_VERSION = "dual-provider-question-graph-v2"
 _QUESTION_GRAPH_PROOF_KEY = secrets.token_bytes(32)
+
+
+# Segments a model invents to name an OR alternative the paper leaves unlabelled.
+# normalize_qid splits "alt1" into "alt.1".
+_ALT_MARKERS = frozenset({"or", "alt", "alternative", "option", "opt"})
+
+
+def qid_stem(normalized: str) -> tuple[str, int | None]:
+    """A normalized qid without its alternative markers, and the alternative it names.
+
+    "q10.alt.2" -> ("q10", 2); "q10.or" -> ("q10", 2); "q10.alt.1.a" -> ("q10.a", 1);
+    "q10" -> ("q10", None). A bare "or" is the second alternative by convention.
+    """
+    parts = normalized.split(".")
+    kept: list[str] = []
+    index: int | None = None
+    i = 0
+    while i < len(parts):
+        if parts[i] in _ALT_MARKERS:
+            i += 1
+            if i < len(parts) and parts[i].isdigit():
+                index = int(parts[i])
+                i += 1
+            elif index is None:
+                index = 2 if parts[i - 1] == "or" else 1
+            continue
+        kept.append(parts[i])
+        i += 1
+    return ".".join(kept), index
+
+
+def resolve_qid(qid: str, known) -> str | None:
+    """The known question id, as spelt in `known`, that a model's spelling refers to.
+
+    Two models never spell every id the same way, and a spelling is not a mark:
+    the operator's rule (2026-09-17) is that a naming difference never blocks a
+    copy. An exact normalized match wins. Otherwise a spelling that differs only
+    by an invented alternative marker resolves to the one known id with the same
+    stem, or, where several known ids share the stem (Q10 and Q10.OR), to the one
+    at the named alternative's position in `known`'s order (alt2 and OR mean the
+    second). Anything else is None: a question the package does not have is
+    still unknown, and an ambiguous bare id is never guessed.
+    """
+    known = [str(k) for k in known]
+    by_norm: dict[str, str] = {}
+    for k in known:
+        by_norm.setdefault(normalize_qid(k), k)
+    norm = normalize_qid(qid)
+    if norm in by_norm:
+        return by_norm[norm]
+    stem, index = qid_stem(norm)
+    if not stem:
+        return None
+    candidates = [k for k in known if qid_stem(normalize_qid(k))[0] == stem]
+    if len(candidates) == 1:
+        return candidates[0]
+    if index is not None and 1 <= index <= len(candidates):
+        return candidates[index - 1]
+    return None
 
 
 def normalize_qid(value: str) -> str:
@@ -140,11 +201,16 @@ class PackageIssue(BaseModel):
 
 
 class RubricCriterionSpec(BaseModel):
+    model_config = {"extra": "forbid"}
     criterion_id: str
     description: str
     max_marks: float = Field(gt=0)
     reference_ids: list[str] = Field(default_factory=list)
     evidence_required: bool = True
+    source_quote: str = ""
+    accepted_answers: list[str] = Field(default_factory=list)
+    marking_rule: str = ""
+    mark_increment: float | None = Field(default=None, gt=0)
     scoring_kind: Literal[
         "objective", "numeric", "method", "theory", "law", "format", "other"
     ] = "other"
@@ -175,6 +241,41 @@ class ChoiceGroup(BaseModel):
     select_count: int = Field(ge=1)
     selection_policy: Literal["first_attempted", "best_score", "explicit"]
     contribution_marks: float = Field(gt=0)
+    # The rule the question paper itself prints for extra attempts, which outranks
+    # the category's default (strict_grading.effective_selection_policy). Empty
+    # when the paper says nothing; then it is left out of the package hash.
+    printed_rule: Literal["", "first_attempted"] = ""
+
+
+# "If more than 15 questions are answered, then only the first 15 will be evaluated."
+# (Uday Bihar Board English, 2026-10-10.) The count it names, or none for "only the
+# first attempt will be evaluated".
+_PRINTED_FIRST_RE = re.compile(
+    r"\bonly\s+(?:the\s+)?first\s+(?:(\d{1,3})\s+)?(?:\w+\s+){0,2}?"
+    r"(?:will|shall|would)\s+be\s+(?:evaluated|checked|marked|assessed|considered)",
+    re.IGNORECASE)
+
+
+def printed_first_rule_counts(paper_text: str) -> set[int] | None:
+    """The "answer any N" counts the paper says are marked first-attempted, an empty
+    set when it says so without a number, or None when it does not say it at all."""
+    found = list(_PRINTED_FIRST_RE.finditer(paper_text or ""))
+    if not found:
+        return None
+    return {int(m.group(1)) for m in found if m.group(1)}
+
+
+def apply_printed_choice_rules(groups, paper_text: str) -> list:
+    """The groups with the paper's own first-attempted rule set where it applies."""
+    counts = printed_first_rule_counts(paper_text)
+    if counts is None:
+        return list(groups or [])
+    out = []
+    for group in groups or []:
+        if not counts or int(getattr(group, "select_count", 0) or 0) in counts:
+            group = group.model_copy(update={"printed_rule": "first_attempted"})
+        out.append(group)
+    return out
 
 
 class OfficialReference(BaseModel):
@@ -215,6 +316,9 @@ class ExamPackage(BaseModel):
         # stable prompt prefixes, which in turn preserves provider-cache hits.
         data["questions"] = sorted(data["questions"], key=lambda q: normalize_qid(q["qid"]))
         data["choice_groups"] = sorted(data["choice_groups"], key=lambda g: g["group_id"])
+        for group in data["choice_groups"]:
+            if not group.get("printed_rule"):
+                group.pop("printed_rule", None)     # hashes as before when unprinted
         data["references"] = sorted(data["references"], key=lambda r: r["reference_id"])
         return data
 
@@ -349,9 +453,7 @@ class ExamPackage(BaseModel):
                         detail=f"{criterion.criterion_id} cites unknown reference(s): {', '.join(missing)}.",
                     ))
 
-        grouped_questions: set[str] = set()
         group_ids: set[str] = set()
-        group_contribution = 0.0
         for group in self.choice_groups:
             group_id = group.group_id.strip().lower()
             if not group_id:
@@ -372,7 +474,6 @@ class ExamPackage(BaseModel):
                             f"from only {len(group.options)} alternatives; a choice must "
                             "leave at least one alternative unselected."),
                 ))
-            option_totals: list[float] = []
             option_ids: set[str] = set()
             for option in group.options:
                 option_id = option.option_id.strip().lower()
@@ -399,38 +500,17 @@ class ExamPackage(BaseModel):
                         severity="block", code="unknown-choice-question",
                         detail=f"{group.group_id}/{option.option_id} contains unknown {missing}.",
                     ))
-                overlap = grouped_questions.intersection(option_qids)
-                if overlap:
-                    issues.append(PackageIssue(
-                        severity="block", code="overlapping-choice-membership",
-                        detail=f"Question(s) {sorted(overlap)} belong to incompatible choices.",
-                    ))
-                grouped_questions.update(option_qids)
-                option_totals.append(sum(float(by_qid[q].max_marks) for q in option_qids
-                                         if q in by_qid))
-            if option_totals and any(abs(total - option_totals[0]) > 0.01
-                                     for total in option_totals[1:]):
-                issues.append(PackageIssue(
-                    severity="block", code="choice-option-maximum-mismatch",
-                    detail=f"{group.group_id} options do not contribute equal maximum marks.",
-                ))
-            if (option_totals and abs(float(group.contribution_marks)
-                                      - option_totals[0] * group.select_count) > 0.01):
-                issues.append(PackageIssue(
-                    severity="block", code="choice-contribution-mismatch",
-                    detail=(f"{group.group_id} contributes {group.contribution_marks:g} marks, "
-                            f"but selecting {group.select_count} option(s) contributes "
-                            f"{option_totals[0] * group.select_count:g}."),
-                ))
-            group_contribution += float(group.contribution_marks)
-
-        fixed_total = sum(
-            float(question.max_marks) for question in self.questions
-            if question.scorable and normalize_qid(question.qid) not in grouped_questions
-        )
-        effective_total = fixed_total + group_contribution
         if self.choice_groups:
-            if abs(effective_total - float(self.total_marks)) > 0.01:
+            try:
+                forest = build_choice_forest(
+                    {normalize_qid(q.qid): float(q.max_marks)
+                     for q in self.questions if q.scorable},
+                    self.choice_groups, normalize_qid)
+                effective_total = forest.effective_total
+            except ChoiceGraphError as exc:
+                issues.append(PackageIssue(severity="block", code=exc.code, detail=str(exc)))
+                effective_total = None
+            if effective_total is not None and abs(effective_total - float(self.total_marks)) > 0.01:
                 issues.append(PackageIssue(
                     severity="block", code="choice-effective-total-mismatch",
                     detail=(f"Fixed questions plus choice groups total {effective_total:g}, "
@@ -456,14 +536,8 @@ def sha256_bytes(data: bytes | None) -> str:
 
 
 def department_for(exam_type: str, student_class: str, subject: str) -> str:
-    text = f"{student_class} {subject}".lower()
-    if (exam_type or "").strip().lower() == "professional" or re.search(
-            r"\b(?:ca|icai|chartered accountant)\b", text):
-        return "ca"
-    if any(word in text for word in (
-            "account", "commerce", "business", "econom", "cost", "audit", "tax", "law")):
-        return "commerce"
-    return "school"
+    """'ca', 'commerce' or 'school' (the rule is kept in categories/subjects.py)."""
+    return _subjects.package_department(exam_type, student_class, subject)
 
 
 def _declared_objective_numbers(question_paper_text: str) -> set[int]:
@@ -492,17 +566,49 @@ def _declared_objective_numbers(question_paper_text: str) -> set[int]:
     # the consecutive top-level labels Q1..Q6; do not require a synthetic range the
     # source never printed.
     count_re = re.compile(
-        r"section\s+[A-Za-z0-9]+\s+contains\s+(\d{1,3})\s+"
+        r"(?:section|part)\s*[-\u2013\u2014]?\s*[A-Za-z0-9]+\s+"
+        r"(?:contains|comprises)\s+(\d{1,3})\s+"
         r"(?:multiple\s+choice\s+questions?|mcqs?|objective\s+questions?)",
         re.IGNORECASE,
     )
     for match in count_re.finditer(text):
         count = int(match.group(1))
         if 1 <= count <= 200 and all(
-                re.search(rf"\bQ\s*{number}(?!\d)", text, re.IGNORECASE)
+                (re.search(rf"\bQ\s*{number}(?!\d)", text, re.IGNORECASE)
+                 or re.search(rf"(?m)^\s*{number}\s*[.)](?=\s|$)",
+                              str(question_paper_text or "")))
                 for number in range(1, count + 1)):
             out.update(range(1, count + 1))
     return out
+
+
+# How far past a "Sol. N." header the stated answer may sit. The Bihar keys put it on
+# the header line or the next one; 200 characters covers a Devanagari label without
+# reaching into the explanation.
+_SOL_ANSWER_WINDOW = 200
+
+# A section letter and a question number, in either order: "A.Q1", "A.1", "AQ1" and
+# "QA1", "QA.1". A bare "Q1" must NOT match - its "Q" is not a section letter - so the
+# leading-letter shape needs a separator or an explicit Q after it, and the leading-Q
+# shape needs a letter before the digits.
+#
+# MEASURED 17-18 Nov 2026: the same Bihar Economics paper came back labelled "A.Q1"
+# from one marks reading and "QA1" from the next. The marks reading is an AI call and
+# its labelling is not stable between runs, so matching one shape only fixed the copy
+# once and let it regress on the re-run.
+_SECTION_QID_PATTERNS = (
+    re.compile(r"\s*([A-Za-z])\s*(?:[.\-]\s*[Qq]?|[Qq])\s*(\d{1,3})\s*"),
+    re.compile(r"\s*[Qq]\s*([A-Za-z])\s*[.\-]?\s*(\d{1,3})\s*"),
+)
+
+
+def _section_and_number(qid: str) -> tuple[str, int] | None:
+    """("A", 1) for a section-labelled row, else None."""
+    for pattern in _SECTION_QID_PATTERNS:
+        match = pattern.fullmatch(str(qid or ""))
+        if match:
+            return match.group(1).upper(), int(match.group(2))
+    return None
 
 
 def _official_objective_answers(
@@ -557,6 +663,20 @@ def _official_objective_answers(
         out.setdefault(number, number_to_letter.get(raw, raw))
     for match in compact_re.finditer(key):
         out.setdefault(int(match.group(1)), match.group(2).upper())
+    # The CA master-test solution shape (Taxation MTS-02/05, FM-SM MTS-03/05, CMA
+    # MTS-05, 2026-09-19): the number on its own line, the option on the next, then
+    # the worked reason - "7.\n(d)\nThe correct option is (d) because ...". None of
+    # the shapes above matched, so every MCQ on those keys was left to model
+    # judgement and wrong options were credited. The number must be one the paper
+    # declares objective, and the sentence must confirm the SAME letter.
+    stated_re = re.compile(
+        r"(?m)^\s*(\d{1,3})\s*[.)]?\s*\n\s*\(\s*([A-Da-d])\s*\)\s*\n"
+        r"\s*(?:The\s+)?correct\s+(?:option|answer)\s+is\s*\(?\s*([A-Da-d])\s*\)?",
+        re.IGNORECASE)
+    for match in stated_re.finditer(key):
+        number = int(match.group(1))
+        if number in declared and match.group(2).upper() == match.group(3).upper():
+            out.setdefault(number, match.group(2).upper())
     # Publisher solution PDFs commonly put explanation text between ``Qn`` and
     # ``Correct Answer``.  Parse within the individual question block so the
     # answer cannot leak from Q(n+1) into Qn when one solution is absent.
@@ -575,6 +695,37 @@ def _official_objective_answers(
         if answer_match:
             raw = (answer_match.group(1) or answer_match.group(2)).upper()
             out.setdefault(number, number_to_letter.get(raw, raw))
+    # A key that numbers its blocks "Sol. 1." and states the answer on the NEXT line
+    # behind a label - "सही उत्तर: (b)", "Correct Answer: (B)". MEASURED 17 Nov 2026
+    # on the Bihar Board Class 11 Economics and English keys: the number and the
+    # letter never share a line and no "Qn" header exists, so none of the four shapes
+    # above matched and all 50 MCQs of a 100-mark paper were left to model judgement.
+    # The copies were then held - "no visible answer mark was recorded" - because
+    # without an official answer no objective row is anchored or evidenced.
+    #
+    # An explicit bracketed A-D is a STATED option, so - as with the compact shape
+    # above - this does not require the paper to have declared an objective range.
+    # That guard exists to stop a numeric answer being read as an option letter, and
+    # it cannot apply here: a Hindi paper declares its range in Hindi.
+    # The header may stand alone ("Sol. 8.") or carry the answer on the same line
+    # ("Sol. 10. सही उत्तर: (c) ..."). The Bihar Economics key does both, switching
+    # shape at question 10, so the end-of-line anchor would have found only 9 of 50.
+    sol_header_re = re.compile(r"(?mi)^\s*Sol(?:ution)?\s*\.?\s*(\d{1,3})\s*[.)]?")
+    # "<label>: (b)" on one line. The explanation line that follows in these keys
+    # ends at its colon, so requiring the bracketed letter keeps them apart.
+    labelled_letter_re = re.compile(r"[^\n]{0,80}?:\s*\(\s*([A-Da-d])\s*\)")
+    sol_headers = list(sol_header_re.finditer(key))
+    for index, header in enumerate(sol_headers):
+        end = (sol_headers[index + 1].start()
+               if index + 1 < len(sol_headers) else len(key))
+        # Only the head of the block. These keys state the answer on the header line
+        # or the one after it; the worked explanation that follows is prose, and
+        # searching all of it would let a sentence such as "option (c) is wrong"
+        # answer the question.
+        end = min(end, header.end() + _SOL_ANSWER_WINDOW)
+        answer_match = labelled_letter_re.search(key, header.end(), end)
+        if answer_match:
+            out.setdefault(int(header.group(1)), answer_match.group(1).upper())
     return out
 
 
@@ -589,6 +740,30 @@ def _question_nodes(
         return nodes
     official_objectives = _official_objective_answers(
         answer_key_text, question_paper_text)
+    # A marks scheme may label its rows by section - "A.Q1" - rather than "Q1". Those
+    # ARE the questions the key answers, but only for ONE section: a paper numbering
+    # Section A 1-50 and Section B 1-14 would otherwise hand B's short-answer rows
+    # Section A's MCQ letters, scoring them all-or-nothing against the wrong key.
+    #
+    # So the objective section is the one whose numbering is EXACTLY the set the key
+    # answers. A strict subset (B's 1-14 sitting inside the key's 1-50) is not enough,
+    # and if two sections match exactly the paper is ambiguous and neither is taken.
+    #
+    # MEASURED 17 Nov 2026, Bihar Board Class 11 Economics: the rows are A.Q1-A.Q50,
+    # B.Q1-B.Q14 and C.Q1-C.Q4, so no row matched the bare-number pattern, not one of
+    # the 50 MCQs was typed objective, and the copies were held with "no visible
+    # answer mark was recorded" on every Section A row.
+    objective_section = ""
+    if official_objectives:
+        by_section: dict[str, set[int]] = {}
+        for item in list(getattr(marks_scheme, "items", None) or []):
+            parsed = _section_and_number(str(getattr(item, "qid", "") or ""))
+            if parsed:
+                by_section.setdefault(parsed[0], set()).add(parsed[1])
+        exact = [name for name, numbers in by_section.items()
+                 if numbers == set(official_objectives)]
+        if len(exact) == 1:
+            objective_section = exact[0]
     for item in list(getattr(marks_scheme, "items", None) or []):
         qid = str(getattr(item, "qid", "") or "").strip()
         maximum = float(getattr(item, "max", 0.0) or 0.0)
@@ -596,11 +771,35 @@ def _question_nodes(
         question_type = str(getattr(item, "question_type", "unknown") or "unknown")
         objective_answer = str(getattr(item, "correct_answer", "") or "").strip()
         top_match = re.fullmatch(r"\s*[Qq]?\s*(\d{1,3})\s*", qid)
-        if top_match:
-            official_answer = official_objectives.get(int(top_match.group(1)))
+        key_number = int(top_match.group(1)) if top_match else None
+        if key_number is None and objective_section:
+            parsed = _section_and_number(qid)
+            if parsed and parsed[0] == objective_section:
+                key_number = parsed[1]
+        # One key letter scores a question all or nothing, so it can only be one MCQ.
+        # MEASURED 2026-10-22 (Maharashtra HSC OCM): the paper numbers its sections I
+        # to V and its key numbers Section I's five MCQs 1 to 5. Read as Q1 to Q5, the
+        # sections took the MCQs' letters: the 4-mark one-word Section II was scored
+        # 0/4 "Correct answer is (B)" on three copies with 3 of 4 right, and the 5-MCQ
+        # Section I got 5/5 from one tick. A row worth more than 2 marks takes a key
+        # letter only when the marks reading itself typed it objective with a letter.
+        single_mcq = maximum <= 2 or (
+            maximum <= 4 and question_type == "objective" and bool(objective_answer))
+        if key_number is not None and single_mcq:
+            official_answer = official_objectives.get(key_number)
             if official_answer:
                 question_type = "objective"
                 objective_answer = official_answer
+        # Nor can the marks reading make one. MEASURED 23 Nov 2026 (Gurukul Grade 5
+        # English): Section B, five 1-mark "circle the correct plural" items worth 5,
+        # was typed objective with the key's first letter (b). Every copy that wrote
+        # the words scored 0/5 "Correct answer is (B).", Khatvik Agrawal's five right
+        # answers among them. One letter cannot answer a row worth more than 4 marks:
+        # it is a list of items, marked on steps from the key, one per item. (A block
+        # of MCQs typed objective WITHOUT a letter keeps its type; see
+        # tests/test_state_key_letters_1022.py.)
+        if question_type == "objective" and maximum > 4 and objective_answer:
+            question_type, objective_answer = "mixed", ""
         nodes.append(QuestionNode(
             qid=qid,
             # Flat source tables do not define non-scorable parent nodes.  Preserve the
@@ -634,8 +833,13 @@ def build_exam_package(
     choice_groups: list[ChoiceGroup] | None = None,
     question_paper_text: str = "",
     answer_key_text: str = "",
+    step_rubric: dict | None = None,
+    department: str = "",
 ) -> ExamPackage:
     """Construct and hash a package from already-extracted authoritative inputs.
+
+    `department` is the operator's chosen exam category's department; without one it
+    is worked out from the exam type, class and subject as before.
 
     Uploaded keys are treated as official because the application cannot independently
     identify an institution's document.  Generated rubric text is intentionally never
@@ -652,7 +856,7 @@ def build_exam_package(
         package_id="pending",
         authority=authority,
         release_eligible=authority == "official",
-        department=department_for(exam_type, student_class, subject),
+        department=department or department_for(exam_type, student_class, subject),
         level=(level or student_class or "").strip(),
         subject=(subject or "").strip(),
         paper=(paper or subject or "").strip(),
@@ -666,11 +870,16 @@ def build_exam_package(
             question_paper_text=question_paper_text,
             answer_key_text=answer_key_text,
         ),
-        choice_groups=list(choice_groups or []),
+        choice_groups=apply_printed_choice_rules(choice_groups, question_paper_text),
         references=[],
         source=source_aliases.get((scheme_source or "").strip().lower(), "unknown"),
         question_graph_proof=(question_graph_proof or "").strip(),
     )
+    from rubrics import rubric_rows
+    fixed = rubric_rows(answer_key_text, package.questions, supplied=step_rubric,
+                        key_hash=package.answer_key_sha256)
+    for question in package.questions:
+        question.criteria = fixed.get(normalize_qid(question.qid), [])
     return package.model_copy(update={"package_id": package.computed_id()})
 
 
@@ -690,6 +899,13 @@ def package_prompt_block(package: ExamPackage) -> str:
             for option in group.options
         )
         for group in package.choice_groups
+    )
+    rubric = "\n".join(
+        f"- {q.qid} / {c.criterion_id}: {c.max_marks:g} marks; {c.description}"
+        + (f"; accepted alternatives: {' | '.join(c.accepted_answers)}" if c.accepted_answers else "")
+        + (f"; rule: {c.marking_rule}" if c.marking_rule else "")
+        + (f"; increment: {c.mark_increment:g}" if c.mark_increment else "")
+        for q in package.questions for c in q.criteria
     )
     optional_metadata = ""
     if package.paper and package.paper.strip().casefold() != package.subject.strip().casefold():
@@ -713,5 +929,14 @@ def package_prompt_block(package: ExamPackage) -> str:
         "The question ids and maxima below are immutable. Never invent, rename, drop, "
         "or rescale them. For internal choice, return every part of each attempted "
         "option and omit wholly unattempted alternatives.\n" + questions
-        + ("\nChoice groups:\n" + choices if choices else "")
+        + "\nUnclear handwriting is uncertainty, never an automatic full award or zero. "
+        "A matching final result does not prove correct reasoning: verify the working. "
+        "Apply error carry-forward only as permitted by the scheme and do not deduct "
+        "twice for the same causal error. Accept valid equivalent solutions.\n"
+        + ("\nChoice groups (nested rules apply only inside a counted parent option; "
+           "a parent lists all leaves of each nested OR):\n" + choices if choices else "")
+        + ("\nFIXED STEP RUBRIC:\nReturn exactly one criterion per listed criterion_id, "
+           "copy its ID to rubric_criterion_id, and preserve its maximum. Do not invent "
+           "additional steps or redistribute marks. For a genuinely blank answer use no criteria.\n"
+           + rubric if rubric else "")
     )

@@ -1,19 +1,23 @@
 """Server-owned proof for independently verified question/maxima graphs.
 
 Browser rows are editable and therefore cannot be grading authority.  This module
-keeps a short-lived, opaque capability that binds a two-provider consensus graph to
-the exact question-paper bytes and official total.  The browser may carry the token,
+keeps an opaque capability that binds a checked graph to the exact question-paper
+bytes and official total. Successful proofs have no time limit by default; bounded
+memory and process restarts still remove them. The browser may carry the token,
 but it can neither create nor alter the graph behind it.
 """
 from __future__ import annotations
 
 import hashlib
 import math
+import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
+
+from choice_graph import ChoiceGraphError, build_choice_forest
 
 from exam_package import (
     QUESTION_GRAPH_PROOF_VERSION,
@@ -62,7 +66,10 @@ def canonical_choice_signature(
     the ExamPackage is built.
     """
     rows = dict(canonical_marks_signature(scheme))
-    grouped_qids: set[str] = set()
+    try:
+        build_choice_forest(rows, scheme.choice_groups, normalize_qid)
+    except ChoiceGraphError as exc:
+        raise MarksAttestationError(str(exc)) from exc
     result: list[tuple[int, float, tuple[tuple[str, ...], ...]]] = []
     seen_groups: set[tuple[int, float, tuple[tuple[str, ...], ...]]] = set()
     for group in list(getattr(scheme, "choice_groups", None) or []):
@@ -73,7 +80,6 @@ def canonical_choice_signature(
         except (TypeError, ValueError) as exc:
             raise MarksAttestationError("A choice rule contains invalid numbers.") from exc
         options: list[tuple[str, ...]] = []
-        option_totals: list[float] = []
         for option in list(getattr(group, "options", None) or []):
             qids = tuple(sorted(
                 normalize_qid(str(qid or ""))
@@ -85,13 +91,7 @@ def canonical_choice_signature(
             if any(qid not in rows for qid in qids):
                 raise MarksAttestationError(
                     "A choice option refers to a question missing from the marks graph.")
-            overlap = grouped_qids.intersection(qids)
-            if overlap:
-                raise MarksAttestationError(
-                    "A question cannot belong to more than one choice option.")
-            grouped_qids.update(qids)
             options.append(qids)
-            option_totals.append(round(sum(rows[qid] for qid in qids), 4))
         if len(options) < 2 or len(set(options)) != len(options):
             raise MarksAttestationError(
                 "A choice rule needs at least two distinct alternatives.")
@@ -100,13 +100,6 @@ def canonical_choice_signature(
                 "A choice rule has an invalid number of selectable alternatives.")
         if not math.isfinite(contribution) or contribution <= 0:
             raise MarksAttestationError("A choice rule has an invalid contribution.")
-        if any(abs(total - option_totals[0]) > 0.01 for total in option_totals[1:]):
-            raise MarksAttestationError(
-                "All alternatives in one choice rule must carry equal marks.")
-        expected = round(option_totals[0] * select_count, 4)
-        if abs(contribution - expected) > 0.01:
-            raise MarksAttestationError(
-                "A choice rule contribution does not match its alternatives.")
         signature = (select_count, contribution, tuple(sorted(options)))
         if signature in seen_groups:
             raise MarksAttestationError("The choice graph contains a duplicate rule.")
@@ -118,15 +111,55 @@ def canonical_choice_signature(
 def effective_marks_total(scheme: MarksScheme) -> float:
     """Maximum one student can score after applying every choice rule."""
     rows = dict(canonical_marks_signature(scheme))
-    choices = canonical_choice_signature(scheme)
+    canonical_choice_signature(scheme)
+    return build_choice_forest(rows, scheme.choice_groups, normalize_qid).effective_total
+
+
+_ALTERNATIVE_QID_RE = re.compile(r"(?:^|\.)(?:alt\d*|or\d*)$", re.IGNORECASE)
+
+
+def choice_total_gap(scheme: MarksScheme | None, official_total: float | None) -> str:
+    """Why a graph's one-student total misses the official total ("" when it matches).
+
+    Written for the teacher and for the one recheck call: the numbers, and any row
+    named as an alternative that no choice rule selects between (the usual cause —
+    both OR alternatives then count as compulsory).
+    """
+    if scheme is None or official_total is None:
+        return ""
+    try:
+        effective = effective_marks_total(scheme)
+    except (MarksAttestationError, ChoiceGraphError, TypeError, ValueError) as exc:
+        return f"The choice rules could not be applied: {exc}"
+    official = float(official_total)
+    if abs(effective - official) <= 0.01:
+        return ""
+    raw = sum(float(item.max) for item in scheme.items)
     grouped = {
-        qid
-        for _select_count, _contribution, options in choices
-        for option in options
-        for qid in option
+        normalize_qid(str(qid or ""))
+        for group in list(getattr(scheme, "choice_groups", None) or [])
+        for option in list(getattr(group, "options", None) or [])
+        for qid in list(getattr(option, "question_ids", None) or [])
     }
-    fixed = sum(maximum for qid, maximum in rows.items() if qid not in grouped)
-    return round(fixed + sum(group[1] for group in choices), 4)
+    loose = [item.qid for item in scheme.items
+             if _ALTERNATIVE_QID_RE.search(str(item.qid or ""))
+             and normalize_qid(item.qid) not in grouped]
+    rules = len(list(getattr(scheme, "choice_groups", None) or []))
+    parts = [
+        f"The question rows add up to {raw:g} marks including every alternative; after "
+        f"{rules} choice rule{'s' if rules != 1 else ''} one student can score "
+        f"{effective:g}, but the paper total is {official:g}."
+    ]
+    if loose:
+        parts.append("These alternatives are not in any choice rule, so both sides are "
+                     "being counted: " + ", ".join(loose[:8]) + ".")
+    elif effective > official:
+        parts.append("An OR alternative may be counted as a compulsory question, or a "
+                     "question may carry more marks than its section allows.")
+    else:
+        parts.append("A question or part may be missing, or carry fewer marks than its "
+                     "section allows.")
+    return " ".join(parts)
 
 
 def marks_rows_agree(first: MarksScheme | None, second: MarksScheme | None) -> bool:
@@ -185,6 +218,9 @@ def reconcile_marks_schemes(
     """
     if first is None or second is None:
         return None
+    # Alternatives the paper leaves unlabelled are matched by structure first
+    # (_alternative_alignment); the literal comparison below then decides.
+    second = _aligned_to(first, second)
     try:
         first_signature = canonical_marks_signature(first)
         second_signature = canonical_marks_signature(second)
@@ -330,6 +366,125 @@ def reconcile_marks_schemes(
     return consensus
 
 
+_QID_BASE_RE = re.compile(r"^(q\d+)")
+
+
+def _alternative_alignment(first: MarksScheme, second: MarksScheme) -> dict[str, str] | None:
+    """How the second reader's question ids map onto the first reader's.
+
+    Two independent readers do not spell question ids the same way, and a name is
+    not a mark: the operator's rule (2026-09-17) is that a naming difference never
+    blocks a paper. What must agree is the structure. Choice groups correspond
+    when their options belong to the same base question, select the same number
+    and carry the same marks option by option in paper order; their ids are then
+    mapped position by position. The remaining rows that no name matches are
+    mapped in paper order when both readers list them with the same marks in the
+    same order. The second reader's ids take the first reader's names; a
+    difference in marks, in row count or in a choice rule is left for the exact
+    comparison, which then fails as before. MEASURED on the Parishram Accountancy
+    unit test: Claude Q10 / Q10.OR against Gemini Q10.alt1 / Q10.alt2, four
+    times, for one graph.
+    """
+    try:
+        first_rows = dict(canonical_marks_signature(first))
+        second_rows = dict(canonical_marks_signature(second))
+    except MarksAttestationError:
+        return None
+
+    def keyed(scheme, rows):
+        out: dict[tuple, list] = {}
+        for group in list(getattr(scheme, "choice_groups", None) or []):
+            options = []
+            bases: set[str] = set()
+            for option in list(getattr(group, "options", None) or []):
+                qids = [normalize_qid(str(q or "")) for q in list(getattr(option, "question_ids", None) or [])]
+                if not qids or any(q not in rows for q in qids):
+                    return None
+                for q in qids:
+                    match = _QID_BASE_RE.match(q)
+                    if match:
+                        bases.add(match.group(1))
+                options.append(qids)
+            shape = tuple(tuple(round(rows[q], 4) for q in qids) for qids in options)
+            key = (tuple(sorted(bases)), int(getattr(group, "select_count", 0) or 0), shape)
+            out.setdefault(key, []).append(options)
+        return out
+
+    first_groups = keyed(first, first_rows)
+    second_groups = keyed(second, second_rows)
+    if first_groups is None or second_groups is None:
+        return None
+    mapping: dict[str, str] = {}
+
+    def bind(source: str, target: str) -> bool:
+        if source == target:
+            return True
+        if mapping.get(source, target) != target or target in second_rows:
+            return False
+        mapping[source] = target
+        return True
+
+    in_first_options: set[str] = set()
+    in_second_options: set[str] = set()
+    for key, groups in first_groups.items():
+        for options in groups:
+            in_first_options.update(q for option in options for q in option)
+        others = second_groups.get(key)
+        if not others or len(groups) != 1 or len(others) != 1:
+            continue
+        for first_option, second_option in zip(groups[0], others[0]):
+            if len(first_option) != len(second_option):
+                break
+            for target, source in zip(first_option, second_option):
+                if not bind(source, target):
+                    return None
+    for options in second_groups.values():
+        for group_options in options:
+            in_second_options.update(q for option in group_options for q in option)
+
+    # Rows outside every choice rule that no name matched: the same marks in the
+    # same paper order is the same question under another spelling.
+    first_order = [normalize_qid(str(item.qid)) for item in list(getattr(first, "items", None) or [])]
+    second_order = [normalize_qid(str(item.qid)) for item in list(getattr(second, "items", None) or [])]
+    renamed = set(mapping)
+    named_both = set(first_order) & (set(second_order) - renamed)
+    first_left = [q for q in first_order if q not in named_both and q not in in_first_options]
+    second_left = [q for q in second_order if q not in named_both and q not in in_second_options
+                   and q not in renamed]
+    if first_left and len(first_left) == len(second_left):
+        if all(first_rows[a] == second_rows[b] for a, b in zip(first_left, second_left)):
+            for target, source in zip(first_left, second_left):
+                if not bind(source, target):
+                    return None
+    if len(set(mapping.values())) != len(mapping):
+        return None
+    return mapping
+
+
+def _aligned_to(first: MarksScheme, second: MarksScheme) -> MarksScheme:
+    """The second scheme with its ids renamed to the first's, where the structure aligns."""
+    mapping = _alternative_alignment(first, second)
+    if not mapping:
+        return second
+    raw = {normalize_qid(str(item.qid)): str(item.qid)
+           for item in list(getattr(first, "items", None) or [])}
+    data = second.model_dump()
+    for item in data.get("items") or []:
+        key = normalize_qid(str(item.get("qid") or ""))
+        if key in mapping:
+            item["qid"] = raw.get(mapping[key], mapping[key])
+    for group in data.get("choice_groups") or []:
+        for option in group.get("options") or []:
+            option["question_ids"] = [
+                raw.get(mapping[normalize_qid(str(q))], mapping[normalize_qid(str(q))])
+                if normalize_qid(str(q)) in mapping else q
+                for q in option.get("question_ids") or []]
+    try:
+        return MarksScheme.model_validate(data)
+    except Exception:
+        return second
+
+
 def schemes_agree(first: MarksScheme | None, second: MarksScheme | None) -> bool:
     """Whether the providers share an exact or safely coarsened authority graph."""
     return reconcile_marks_schemes(first, second) is not None
@@ -389,8 +544,20 @@ class MarksAttestation:
     official_total: float
     context_sha256: str
     scheme: MarksScheme
-    extractors: tuple[str, str]
+    extractors: tuple[str, ...]
     created_at: float
+    expires_at: float | None
+
+
+@dataclass(frozen=True)
+class MarksVerificationRetry:
+    """A completed first reading, never proof of independent agreement."""
+    scheme: MarksScheme
+    task_id: str
+    method: str
+    failure_code: str
+    detail: str
+    retry_at: float
     expires_at: float
 
 
@@ -404,16 +571,54 @@ class MarksAttestationStore:
     def __init__(
         self,
         *,
-        ttl_seconds: float = 2 * 60 * 60,
+        ttl_seconds: float | None = None,
         max_entries: int = 128,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self.ttl_seconds = float(ttl_seconds)
+        self.ttl_seconds = None if ttl_seconds is None else float(ttl_seconds)
         self.max_entries = int(max_entries)
         self._clock = clock
         self._lock = threading.Lock()
         self._records: dict[str, MarksAttestation] = {}
         self._by_paper: dict[tuple[str, float, str], str] = {}
+        self._retries: dict[tuple, MarksVerificationRetry] = {}
+
+    def _retry_key(self, paper_bytes, official_total, context, owner):
+        return (_paper_hash(paper_bytes), _normal_total(official_total),
+                _context_hash(context), _context_hash(owner))
+
+    def retain_for_retry(self, paper_bytes, official_total, scheme, *, context,
+                         owner, task_id, method, failure_code, detail, retry_after=0):
+        canonical_marks_signature(scheme)
+        if abs(effective_marks_total(scheme) - _normal_total(official_total)) > .01:
+            raise MarksAttestationError("An incomplete extraction cannot be retained for retry.")
+        key = self._retry_key(paper_bytes, official_total, context, owner)
+        now = self._clock()
+        record = MarksVerificationRetry(
+            scheme=scheme.model_copy(deep=True), task_id=task_id, method=method,
+            failure_code=failure_code, detail=detail,
+            retry_at=now + max(0, min(float(retry_after), 600)),
+            expires_at=now + min(self.ttl_seconds if self.ttl_seconds is not None else 900, 900),
+        )
+        with self._lock:
+            self._retries[key] = record
+            self._purge_locked(now)
+        return replace(record, scheme=record.scheme.model_copy(deep=True))
+
+    def find_retry(self, paper_bytes, official_total, *, context, owner):
+        key = self._retry_key(paper_bytes, official_total, context, owner)
+        with self._lock:
+            self._purge_locked(self._clock())
+            record = self._retries.get(key)
+            return replace(record, scheme=record.scheme.model_copy(deep=True)) if record else None
+
+    def clear_retry(self, paper_bytes, official_total, *, context, owner):
+        key = self._retry_key(paper_bytes, official_total, context, owner)
+        with self._lock:
+            self._retries.pop(key, None)
+
+    def retry_delay(self, record):
+        return max(0, math.ceil(record.retry_at - self._clock()))
 
     @staticmethod
     def _copy(record: MarksAttestation) -> MarksAttestation:
@@ -430,8 +635,13 @@ class MarksAttestationStore:
         )
 
     def _purge_locked(self, now: float) -> None:
+        for key in [key for key, item in self._retries.items() if item.expires_at <= now]:
+            self._retries.pop(key, None)
+        overflow = len(self._retries) - self.max_entries
+        for key in sorted(self._retries, key=lambda key: self._retries[key].expires_at)[:max(0, overflow)]:
+            self._retries.pop(key, None)
         expired = [token for token, record in self._records.items()
-                   if record.expires_at <= now]
+                   if record.expires_at is not None and record.expires_at <= now]
         for token in expired:
             record = self._records.pop(token)
             key = (record.paper_sha256, record.official_total, record.context_sha256)
@@ -451,13 +661,21 @@ class MarksAttestationStore:
         paper_bytes: bytes,
         official_total: float,
         scheme: MarksScheme,
-        verifier_scheme: MarksScheme,
+        verifier_scheme: MarksScheme | None = None,
         *,
-        extractors: tuple[str, str],
+        extractors: tuple[str, ...],
         context: str,
     ) -> MarksAttestation:
+        """Issue the proof for a checked graph.
+
+        The app reads the marks ONCE (one Claude model), so ``verifier_scheme`` is
+        normally None and the reading is reconciled with itself, which applies the same
+        canonicalisation as a two-reader agreement. A second reading, when one is given,
+        must still agree and must come from a different model.
+        """
         canonical_marks_signature(scheme)
-        consensus = reconcile_marks_schemes(scheme, verifier_scheme)
+        consensus = reconcile_marks_schemes(
+            scheme, verifier_scheme if verifier_scheme is not None else scheme)
         if consensus is None:
             raise MarksAttestationError(
                 "The two providers did not return the same complete question/choice graph.")
@@ -468,14 +686,12 @@ class MarksAttestationStore:
                 "The verified fixed questions and choice rules do not equal the official total.")
         context_sha256 = _context_hash(context)
         provider_pair = tuple(str(value or "").strip() for value in extractors)
-        provider_families = tuple(
-            value.split(":", 1)[0].strip().casefold() for value in provider_pair)
-        if (len(provider_pair) != 2 or not all(provider_pair)
-                or len(provider_families) != 2
-                or not all(provider_families)
-                or provider_families[0] == provider_families[1]):
+        expected = 1 if verifier_scheme is None else 2
+        if (len(provider_pair) != expected or not all(provider_pair)
+                or len({value.casefold() for value in provider_pair}) != expected):
             raise MarksAttestationError(
-                "Two different provider families are required for marks verification.")
+                "Name the model that read the marks (and a different second model "
+                "when a second reading is supplied).")
         authority = marks_authority_scheme(consensus)
         proof = issue_question_graph_proof(
             paper_sha256,
@@ -498,9 +714,9 @@ class MarksAttestationStore:
                     group.model_dump() for group in authority.choice_groups
                 ],
             }),
-            extractors=(provider_pair[0], provider_pair[1]),
+            extractors=provider_pair,
             created_at=now,
-            expires_at=now + self.ttl_seconds,
+            expires_at=None if self.ttl_seconds is None else now + self.ttl_seconds,
         )
         with self._lock:
             self._purge_locked(now)
@@ -528,6 +744,12 @@ class MarksAttestationStore:
             token = self._by_paper.get(key)
             record = self._records.get(token or "")
             return self._copy(record) if record else None
+
+    def is_available(self, token: str) -> bool:
+        """Check cache presence, never the paper or submitted marks' authority."""
+        with self._lock:
+            self._purge_locked(self._clock())
+            return str(token or "").strip() in self._records
 
     def resolve(
         self,

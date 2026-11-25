@@ -74,12 +74,11 @@ class Cfg:
     exam_type = "professional"
 
 
-_real = sys.modules.get("grader_gemini")
-import grader_gemini
+import grader
 
-_orig = grader_gemini.orientation_probe
-grader_gemini.orientation_probe = lambda pages, **kw: (calls.append(kw.get("filename")),
-                                                       [0] * len(pages))[1]
+_orig = grader.orientation_probe
+grader.orientation_probe = lambda pages, **kw: (calls.append(kw.get("filename")),
+                                                [0] * len(pages))[1]
 try:
     orient = server._make_orienter(Cfg())
     orient(digital, "qp.pdf")
@@ -91,7 +90,7 @@ try:
     check("and the bytes come back usable either way",
           isinstance(orient(digital, "qp.pdf"), bytes))
 finally:
-    grader_gemini.orientation_probe = _orig
+    grader.orientation_probe = _orig
 
 print("\n== throttling us for our own concurrency is not a page-losing error ==")
 check("429 retries", 429 in pw_access._RETRY_STATUSES)

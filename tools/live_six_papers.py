@@ -100,7 +100,7 @@ def _request_json(method: str, path: str, *, headers: dict, timeout: int, **kwar
 
 def _common(case: dict) -> dict[str, str]:
     return {
-        "provider": "gemini",
+        "provider": "claude",
         "model": "",
         "student_class": case["student_class"],
         "exam_level": case["student_class"],

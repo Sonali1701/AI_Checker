@@ -20,6 +20,12 @@ from mathpix import LineBox, PageOCR
 import pdf_renderer as pr
 from pdf_renderer import build_evaluated_pdf
 
+# A legacy-contract suite: marks stay inside the sheet and within reach of their
+# evidence row, and checking plans are drawn. The teacher layout (the product
+# default) has its own contract in test_teacher_layout.py.
+import pdf_renderer as _pr
+_pr.TEACHER_LAYOUT = False
+
 FAILS = []
 
 
@@ -32,6 +38,7 @@ def check(name, cond, detail=""):
 N_PAGES = 4
 LINES_PER_PAGE = 8
 W, H = 595.0, 842.0
+MARGIN_W = max(pr.STRIP_MIN_WIDTH, W * pr.STRIP_FRACTION)
 
 
 def blank_pages() -> bytes:
@@ -131,8 +138,8 @@ def red_marks(page, edge):
                 break
         else:
             groups.append(fitz.Rect(rect))
-    return ([g for g in groups if g.x1 <= edge + 2],
-            [g for g in groups if g.x0 >= edge - 2])
+    return ([g for g in groups if g.x0 >= edge - 2],
+            [g for g in groups if g.x1 <= edge + 2])
 
 
 full = QuestionMark(
@@ -148,7 +155,7 @@ one = build_evaluated_pdf(
                        questions=[full]),
     ocr_pages=fake_ocr(), mark_scale=1.0)
 doc_one = fitz.open(stream=one, filetype="pdf")
-on_answer, in_strip = red_marks(doc_one[0], W)
+on_answer, in_strip = red_marks(doc_one[0], MARGIN_W)
 check("the answer itself is ticked", len(on_answer) >= 1, len(on_answer))
 check("and the strip does not tick it again", not in_strip,
       f"{len(in_strip)} tick(s) still drawn in the margin")
@@ -180,7 +187,7 @@ stranded = build_evaluated_pdf(
     ocr_pages=[PageOCR(page=1, image_width=int(W), image_height=int(H), lines=labelled)],
     mark_scale=1.0)
 doc_two = fitz.open(stream=stranded, filetype="pdf")
-marks, _ = red_marks(doc_two[0], W)
+marks, _ = red_marks(doc_two[0], MARGIN_W)
 check("the row is marked", bool(marks), "no red mark on the answer at all")
 # The rescue is deliberately narrow: a ledger's particulars cell also ends in the
 # left third of the page, and dragging its tick to the far edge of the table would
@@ -200,7 +207,7 @@ if marks:
     # The student page is stamped below the cover, so compare on x only: every mark
     # for this row must sit past the working, never beside the "(c)" that labels it.
     check("no tick is stranded left of the working",
-          min(m.x0 for m in marks) > 208,
+          min(m.x0 for m in marks) - MARGIN_W > 208,
           f"leftmost mark at x={min(m.x0 for m in marks):.0f}, working ends at 500")
 doc_two.close()
 

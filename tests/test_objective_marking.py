@@ -127,8 +127,16 @@ _tick, _cross = pdf_renderer._draw_tick, pdf_renderer._draw_cross
 
 def _rec(kind, real):
     def wrapper(page, x, y, size=26, seed="", **kw):
-        drawn.append((kind, page.rect.width, x, y, size))
-        return real(page, x, y, size=size, seed=seed, **kw)
+        before = len(page.get_drawings())
+        result = real(page, x, y, size=size, seed=seed, **kw)
+        # Tick y is its elbow baseline, whereas cross y is its centre. Measure
+        # the visible paths so placement is judged the same way for both glyphs.
+        paths = page.get_drawings()[before:]
+        box = fitz.Rect(paths[0]["rect"])
+        for path in paths[1:]:
+            box |= path["rect"]
+        drawn.append((kind, page.rect.width, x, (box.y0 + box.y1) / 2, size))
+        return result
     return wrapper
 
 

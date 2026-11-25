@@ -17,6 +17,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from remark_quality import MARGIN_REMARK_MAX_WORDS
 from grader import (
     GradeReport,
     QuestionMark,
@@ -127,7 +128,8 @@ JUDGED = [
     "Net profit Rs 34,503 not added to capital. Should be 80,593.",
 ]
 for line in JUDGED:
-    check(f"{line[:34]!r} is <= 12 words", len(line.split()) <= 12, f"{len(line.split())}")
+    check(f"{line[:34]!r} is within the margin cap",
+          len(line.split()) <= MARGIN_REMARK_MAX_WORDS, f"{len(line.split())}")
     check(f"{line[:34]!r} survives cleaning unchanged",
           humanise_remark(line, margin=True).rstrip(".") == line.rstrip("."),
           humanise_remark(line, margin=True))
@@ -137,7 +139,12 @@ for line in JUDGED:
 print("== the prompt bans reciting the rule instead of marking the error ==")
 _p = build_system_prompt("Accounting", "CA Foundation", "professional")
 check("prompt carries the rule-vs-error tell", "MARK THE ERROR, DO NOT STATE THE RULE" in _p)
-check("prompt caps margin notes at 12 words", "12 WORDS MAXIMUM" in _p)
+# The reviewer's rule (2026-09-16): a margin note is one or two short plain
+# sentences, the fault and what to write instead, not a 12-word fragment.
+check("prompt keeps margin notes to one or two short sentences", "one or two" in _p)
+_school = build_system_prompt("Social Science", "10", "school")
+check("the school prompt states the rule in full",
+      "one or two short plain sentences" in _school)
 check("prompt demands ONE fault", "Name ONE fault" in _p)
 check("prompt forbids inventing unstated facts", "is an invention" in _p)
 

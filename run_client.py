@@ -10,7 +10,17 @@ Hardened for non-technical users on Windows:
 """
 from __future__ import annotations
 
+import multiprocessing
+
+if __name__ == "__main__":
+    # Folder mode's grading processes (grading_engine.py) are this same EXE started
+    # again. Each does its work inside this call and exits there, before the server
+    # below is imported.
+    multiprocessing.freeze_support()
+
+import glob
 import os
+import shutil
 import socket
 import sys
 import threading
@@ -25,6 +35,7 @@ from server import API_PROTOCOL_VERSION, BUILD_ID
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
            else os.path.dirname(os.path.abspath(__file__)))
 LOG_PATH = os.path.join(APP_DIR, "aichecker.log")
+OLD_UNPACKED_COPY_SECONDS = 3600  # a copy still unpacking has no DLL loaded yet, so age protects it
 
 
 class _Tee:
@@ -139,8 +150,23 @@ def _ports_to_check_for_running_copy() -> tuple[int, ...]:
     return (int(env),) if env else _PORTS
 
 
+def _running_build(port: int) -> str:
+    """The build id of the AI Checker holding this port, or "" when it is a stranger."""
+    import json as _json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=1.5) as r:
+            health = _json.load(r)
+            if health.get("ok") and health.get("app") == "AI Copy Checker":
+                return str(health.get("build_id") or "unknown build")
+    except Exception:
+        pass
+    return ""
+
+
 def _already_running(port: int) -> bool:
-    """True when the thing holding this port is another AI Checker, not a stranger."""
+    """True when the thing holding this port is this same AI Checker build."""
     import json as _json
     import urllib.request
     try:
@@ -155,6 +181,38 @@ def _already_running(port: int) -> bool:
             )
     except Exception:
         return False
+
+
+def _give_way_to_other_programs() -> None:
+    """Below normal priority: the computer stays quick for whoever is using it, and an idle
+    computer still gives the app everything (operator, 30 Oct 2026)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
+    except Exception:
+        pass
+
+
+def _clear_old_unpacked_copies(here: str) -> None:
+    """The EXE unpacks into a folder named runtime under %LOCALAPPDATA% (AICheckerClient.spec). No
+    cleaner visits it, so what a killed copy left is removed here. Windows refuses to delete a loaded
+    DLL (it does allow a rename), so a running copy is left alone: deleting files under a running
+    copy is what broke 152."""
+    home = os.path.dirname(here)
+    if not here or os.path.basename(home) != "runtime":
+        return
+    for name in os.listdir(home):
+        folder = os.path.join(home, name)
+        try:
+            if not name.startswith("_MEI") or folder == here or time.time() - os.path.getmtime(folder) < OLD_UNPACKED_COPY_SECONDS:
+                continue
+            for interpreter in glob.glob(os.path.join(glob.escape(folder), "python3[0-9]*.dll")):
+                os.remove(interpreter)
+        except OSError:
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _hold(message: str = "") -> None:
@@ -179,37 +237,85 @@ def _wait_then_open(url: str) -> None:
     _open_browser(url)
 
 
+def _browser_url(url: str) -> str:
+    """The workflow and PW Skills shortcuts select their page on the local checker server."""
+    page = os.environ.get("AICHECKER_START_PAGE", "").strip()
+    if page in ("/workflow.html", "/skills.html"):
+        from urllib.parse import urlsplit, urlunsplit
+        parsed = urlsplit(url)
+        return urlunsplit((parsed.scheme, parsed.netloc, page, "", ""))
+    return url
+
+
+def _sibling(other_build: str) -> bool:
+    """The same build in the other mode: the PW Skills tool beside the checker or workflow
+    app (server.APP_MODE). Each keeps to its own server, port and data, so a port one of
+    them holds is simply passed over, not reported as an older copy to close."""
+    def base(build_id: str) -> str:
+        return build_id[:-len("-skills")] if build_id.endswith("-skills") else build_id
+    return bool(other_build) and other_build != BUILD_ID and base(other_build) == base(BUILD_ID)
+
+
 def _open_browser(url: str) -> bool:
     """Open the UI unless an operator explicitly requested a headless launch."""
     disabled = str(os.environ.get("AICHECKER_NO_BROWSER") or "").strip().lower()
     if disabled in {"1", "true", "yes"}:
         return False
     try:
-        return bool(webbrowser.open(url))
+        return bool(webbrowser.open(_browser_url(url)))
     except Exception:
         return False
 
 
 def main() -> None:
+    if os.environ.get("AICHECKER_ENGINE_SELFTEST") == "1":
+        # Release smoke check (tools/smoke_release.py): folder mode's worker processes
+        # start inside this EXE and hand back a result. No grading, no network.
+        import json
+        import grading_engine
+        print(json.dumps(grading_engine.selftest()), flush=True)
+        return
+    if os.environ.get("AICHECKER_WORKFLOW_SELFTEST") == "1":
+        # Release smoke check (tools/smoke_release.py): the portal workflow must work
+        # from inside this EXE: the vendored engine, the bundled Playwright driver and
+        # a browser this computer has (Chrome, else Edge). Headless, no network.
+        import json
+        import integrated_workflow
+        print(json.dumps(integrated_workflow.selftest()), flush=True)
+        return
     _setup_logging()
     _disable_quickedit()
+    _give_way_to_other_programs()
+    threading.Thread(target=_clear_old_unpacked_copies, args=(getattr(sys, "_MEIPASS", ""),), daemon=True).start()
     try:
         host = "127.0.0.1"
         # A copy already open is the ordinary case, not an error: the user clicked the
         # icon again, or closed the browser tab and wants it back. Take them to the one
         # that is running instead of starting a second server that cannot bind.
         for p in _ports_to_check_for_running_copy():
-            if not _port_free(p) and _already_running(p):
+            if _port_free(p):
+                continue
+            if _already_running(p):
                 running = f"http://{host}:{p}"
-                print(f"AI Checker is already running at {running}.")
+                print(f"AI Checker is already running at {_browser_url(running)}.")
                 print("Opening it in your browser. To restart it, close the other")
                 print("AI Checker window first, then open this again.")
                 _open_browser(running)
                 _hold()
                 return
+            other = _running_build(p)
+            if _sibling(other):
+                continue
+            if other:
+                # Two builds side by side share the same saved runs and portal windows
+                # and confuse each other (12 Oct: Resume and Stop went to the old one).
+                _hold(f"\nAn older AI Checker ({other}) is still running at http://{host}:{p}.\n"
+                      "Close its window first (or end AICheckerClient / AICheckerWorkflow / PWSkillsChecker in Task Manager),\n"
+                      "then open this one again. Saved runs are kept and will appear here.")
+                return
         port = _pick_port()
         url = f"http://{host}:{port}"
-        print(f"AI Checker is running at {url}")
+        print(f"AI Checker is running at {_browser_url(url)}")
         print("Keep this window open while you work. Close it to quit.")
         print(f"(Logs are also saved to {LOG_PATH})")
         threading.Thread(target=_wait_then_open, args=(url,), daemon=True).start()

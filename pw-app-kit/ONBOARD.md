@@ -23,23 +23,28 @@ if not pw_access.check_allowed(google_token):
 
 Route all provider calls through the kit helpers. Do not ship provider keys.
 
-For multi-call tasks:
+Always pass a task_id:
 
 ```python
 task_id = pw_access.new_task_id("my-app")
-pw_access.gemini_generate(token, model="gemini-2.5-flash", request=req, task_id=task_id)
+pw_access.gemini_generate(token, model="gemini-2.5-flash", request=req,
+                          input_unit="No. of pages", count=1, task_id=task_id)
 ```
 
-Use the same `task_id` for every AI call in that task.
+Use the same `task_id` for every AI call in that task. Without one, the job's
+volume cannot be totalled and shows blank on the dashboard.
+
+`count` = what THIS call processed (one call doing 3 pages sends 3). Keep
+`input_unit` the same across the app.
 
 ## Logging Rule
 
 The proxy logs raw usage automatically. Do not use `log:false`,
 `UsageSession.flush()`, or `/api/usage-log` for normal provider calls.
 
-Rows appear in `Raw Usage Ledger Export`. Combine later by:
-
-`Task ID + App Name + Email + Model`
+Rows appear in the `Usage Cost 2.0` tab, already grouped per task by the
+proxy. You do not combine anything yourself. The old
+`Raw Usage Ledger Export` tab is retired.
 
 ## Verify
 

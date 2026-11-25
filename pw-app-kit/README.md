@@ -7,8 +7,8 @@ What the kit gives you:
 
 - per-user, per-app allowlist checks
 - provider calls through the shared proxy
-- proxy-side raw usage logging to MongoDB
-- sheet export to `Raw Usage Ledger Export`
+- proxy-side usage logging to MongoDB, rolled up per task
+- cost rows in the `Usage Cost 2.0` sheet tab
 - 7-day proxy session pass so long runs do not fail after Google's token expiry
 - large Gemini/Claude request support through the proxy blob upload route
 
@@ -34,7 +34,7 @@ and logs trusted usage.
 | Proxy URL | `https://pw-apps-proxy.vercel.app` |
 | Control sheet | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
 | Allowed account domain | `pw.live` |
-| Raw export tab | `Raw Usage Ledger Export` |
+| Cost sheet tab | `Usage Cost 2.0` |
 | Providers | Gemini text, Gemini TTS, Gemini image, Claude, Mathpix, Sarvam TTS, ElevenLabs TTS |
 
 ## What Changed In v2
@@ -43,8 +43,11 @@ and logs trusted usage.
 - Apps should not use client-side combined logging for provider calls.
 - `log:false` is not part of the developer workflow.
 - `UsageSession.flush()` is now a compatibility no-op.
-- For multi-call tasks, apps should pass one `task_id` to every provider call.
-- Combining is done later from raw rows using `Task ID + App Name + Email + Model`.
+- Apps pass one `task_id` to every provider call in a user task.
+- Combining happens in the PROXY, not downstream. It rolls calls up into one
+  row per (task, app, user, file, model), and the sheet reads finished rows.
+- `count` means what a single call processed. Be consistent - see
+  `CONNECT-TO-PW-PROXY.md` section 6.
 
 ## Human Steps
 
@@ -77,16 +80,17 @@ pw_access.mathpix_ocr(token, request=req2, task_id=task_id)
 pw_access.gemini_generate(token, model="gemini-2.5-flash", request=req3, task_id=task_id)
 ```
 
-In the sheet, each raw call is a separate row. Your combined view can group by:
-
-`Task ID + App Name + Email + Model`
+The proxy groups those calls for you. In `Usage Cost 2.0` they appear as one
+row per model used by the task, all sharing the `task_id` - not one row per
+call. Cost adds up across those rows; volume does not, because each row repeats
+the same job.
 
 ## Verify
 
 - Python app: `python pw-app-kit/verify_onboarding.py .env`
 - JS app: `node pw-app-kit/verify_onboarding.mjs .env`
-- Live test: sign in as a whitelisted user, make one AI call, then check
-  `Raw Usage Ledger Export`.
+- Live test: sign in as a whitelisted user, make one AI call, then check the
+  `Usage Cost 2.0` tab (syncs every 15 minutes).
 
 ## Rule
 

@@ -4,5 +4,16 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 pymupdf>=1.24
 pillow>=10.0
+# iPhone photos: iOS uploads HEIC from the camera roll by default (23 Nov 2026).
+pillow-heif>=1.8
+numpy>=1.26
 pydantic>=2.0
 requests>=2.31
+# Integrated spreadsheet / portal workflow (system Chrome is reused)
+playwright>=1.40
+pandas>=2.1
+openpyxl>=3.1
+# School of Innovation submissions: Word documents, and Power BI data models
+# (XPress9-compressed; MIT, https://github.com/Hugoberry/xpress9-python)
+python-docx>=0.8
+xpress9>=0.3.9

@@ -1,0 +1,329 @@
+{
+ "paper": "NID Mock 1 (Part B), Design pro 2027, NID MOCK-1_1750496699699.pdf",
+ "source": "Faculty-checked copies and remarks from the Design team's sheet 'Requirement (CLAT/ Design)', Copy Data tab, received 2026-10-05",
+ "questions": {
+  "Q1": {
+   "max": 15,
+   "task": "Logo for an artisanal home-baked cookie brand"
+  },
+  "Q2": {
+   "max": 20,
+   "task": "Kitchen scene from a toy car on the floor: Reem (3) climbing a chair for the cookie on the fridge, startled cat, drawings on the fridge"
+  },
+  "Q3": {
+   "max": 15,
+   "task": "Poster on global warming and its effect on animals, with a slogan"
+  },
+  "Q4": {
+   "max": 20,
+   "task": "Super speed shoe for a boy: wings or rockets, glow and jump buttons, sustainable materials, price"
+  }
+ },
+ "design_team_review_of_ai_copies": {
+  "Arijeet": {
+   "status": "Minor correction required",
+   "remark": "All the points were covered. It can also cover the human figure factor that hands are distorted."
+  },
+  "Trusha": {
+   "status": "Minor correction required",
+   "remark": "There should be constructive reviews. Posters should be well aligned with space management, typography, text alignment, overall execution. In last question: product should be in different views, should work on labelling and perspective should be a little larger."
+  },
+  "Vihar": {
+   "status": "Minor correction required",
+   "remark": "Points are covered and explained well but marks will be deducted more. Perspective needs to get more depth."
+  },
+  "Somya": {
+   "status": "Copies are checked through AI correctly",
+   "remark": "All points were covered."
+  },
+  "Vaidaihi": {
+   "status": "Copies are checked through AI correctly",
+   "remark": "All points were covered."
+  }
+ },
+ "sheets": [
+  {
+   "student": "Arijeet",
+   "file": "64d7247c-fce9-41fc-8dab-b70c53021d8a.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/64d7247c-fce9-41fc-8dab-b70c53021d8a.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a25aaaf0105c45ebb443d78/209b1299-2919-4a34-8d4f-8e8ba4d85710.pdf",
+   "faculty": {
+    "Q1": 8,
+    "Q2": 10,
+    "Q3": 8,
+    "Q4": 10
+   },
+   "faculty_total": 36,
+   "ai_before": {
+    "build": "64/65, the copy the Design team reviewed",
+    "copy": "REVIEW_64d7247c... (Drive 13slNC-bmOFs1Y0xtMx_hkkM2_8jM_IDD)",
+    "marks": {
+     "Q1": 9,
+     "Q2": 14,
+     "Q3": 9.5,
+     "Q4": 10.5
+    }
+   },
+   "comments": {
+    "overall": "You demonstrate good conceptual understanding, but consistency in perspective, stronger creativity, and better presentation techniques are needed. Focus on layout, color choices, and visual communication to elevate your work further.",
+    "Q1": "Typography is handled reasonably well, but the logo itself is quite basic. The design requires more creativity and stronger visual identity. Color selection can also be improved to make the logo more impactful.",
+    "Q2": "A good attempt overall. However, the composition appears to be drawn using multiple perspective systems simultaneously. The kitchen area resembles two-point perspective, the refrigerator section appears to follow one-point perspective, and the child seems to be drawn in three-point perspective. The entire composition should follow a consistent three-point perspective. Animal anatomy requires improvement, and the child's height should be more appropriate to the age mentioned in the question.",
+    "Q3": "The poster concept is interesting, but the overall execution needs improvement. Text placement, typography alignment, use of negative space, and color selection all require further attention. A stronger visual hierarchy would improve communication of the message.",
+    "Q4": "A good attempt. Adding color would improve the presentation significantly. Try incorporating more futuristic and innovative ideas while presenting your concept. The overall presentation quality can also be enhanced."
+   }
+  },
+  {
+   "student": "Trusha",
+   "file": "98dc2896-f094-43bc-a8cf-b60a62027c38.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/98dc2896-f094-43bc-a8cf-b60a62027c38.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a25b6710105c45ebb445bf5/6c5f7a48-c13c-445b-ad20-c9c9cb6a0328.pdf",
+   "faculty": {
+    "Q1": 10,
+    "Q2": 8,
+    "Q3": 8,
+    "Q4": 8
+   },
+   "faculty_total": 34,
+   "ai_before": {
+    "build": "64/65, the copy the Design team reviewed",
+    "copy": "FACULTY_REVIEW_98dc2896... (Drive 1b4tTYRzAgaez2O7K2ZpV_t8DY7fAJ9Ze)",
+    "marks": {
+     "Q1": 8.5,
+     "Q2": 10,
+     "Q3": 8,
+     "Q4": 12.5
+    }
+   },
+   "comments": {
+    "overall": "You have good design instincts and your presentation is generally neat. Focus on larger drawings, stronger creativity, improved perspective understanding, and making your concepts more innovative. Continue working on visual communication and presentation quality.",
+    "Q1": "The logo design is visually appealing with a good choice of colors and textures. The typography shows originality and experimentation, which is a positive aspect. However, try to simplify the logo further, as minimalism often creates stronger and more memorable logo designs. Overall, it is a good attempt.",
+    "Q2": "This composition should have been drawn in three-point perspective because the viewpoint is from a toy car placed on the floor. The current perspective treatment does not fully capture this requirement. Practice three-point perspective compositions to improve accuracy and realism.",
+    "Q3": "The poster concept is good, but the final output resembles a presentation slide rather than a poster. Posters should communicate a strong message through impactful visuals, meaningful typography, and effective composition. Work on understanding poster design principles and visual hierarchy.",
+    "Q4": "The shoe design is visually attractive, but the drawing is too small to properly showcase your skills. In drawing-based examinations, the primary object should occupy a significant portion of the page, ideally around half the sheet. The concept itself is somewhat basic, so try developing more innovative and creative solutions."
+   }
+  },
+  {
+   "student": "Vihar",
+   "file": "d9260408-a11c-4fd2-a739-dab2f0bbe6ca.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/d9260408-a11c-4fd2-a739-dab2f0bbe6ca.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a2561d43725a82457b42842/99437d2d-6bfb-4d8d-89d2-7f13cf62f6d1.pdf",
+   "faculty": {
+    "Q1": 7,
+    "Q2": 4,
+    "Q3": 0,
+    "Q4": 5
+   },
+   "faculty_total": 16,
+   "ai_before": {
+    "build": "64/65, the copy the Design team reviewed",
+    "copy": "REVIEW_d9260408... (Drive 1aPKmUDUpzufi0HjBkQJd8t4jit-124BN)",
+    "marks": {
+     "Q1": 8.5,
+     "Q2": 8.5,
+     "Q3": 0,
+     "Q4": 9.5
+    }
+   },
+   "comments": {
+    "overall": "You need to focus on understanding the question requirements before attempting the solution. Presentation quality, concept development, and shading techniques require improvement. Try to make your compositions complete, visually engaging, and easy to understand.",
+    "Q1": "The logo is too detailed for effective logo design. Logos should be simple, memorable, and minimal. Try simplifying the design elements and selecting colors that support the concept more effectively.",
+    "Q2": "You need to work on understanding the complete requirement of the question. The scenario clearly mentions a child standing on a chair and reaching for a cookie box placed on top of the refrigerator. Most of these important elements are missing from your composition, making the scene appear incomplete. The kitchen environment, supporting characters, and overall storytelling need to be developed further. Additionally, shading and rendering require improvement to create depth and realism.",
+    "Q3": "Not attempted.",
+    "Q4": "The concept appears underdeveloped and lacks proper presentation. If you are trying to showcase an origami-inspired shoe design, the inspiration and construction should be clearly visible. A good concept is effective only when it is presented properly on paper. Focus on improving your presentation skills and making your design process easier to understand."
+   }
+  },
+  {
+   "student": "Somya",
+   "file": "39f7a006-6fa8-4122-bfed-6463bc6842f9.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/39f7a006-6fa8-4122-bfed-6463bc6842f9.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a97121c63681d86d27234c1/79ce4ae0-e687-4222-981a-0c913cf0ea53.pdf",
+   "faculty": {
+    "Q1": 10,
+    "Q2": 10,
+    "Q3": 7,
+    "Q4": 11
+   },
+   "faculty_total": 38,
+   "ai_before": {
+    "build": "64/65, the copy the Design team reviewed",
+    "copy": "REVIEW_39f7a006... (Drive 1agcNiytb-o7aTD7CwFZXpwC1wW6PTuXt)",
+    "marks": {
+     "Q1": 7.5,
+     "Q2": 10,
+     "Q3": 7,
+     "Q4": 7
+    }
+   },
+   "comments": {
+    "Q1": "Draw by taking more space. Work on depth in the shading.",
+    "Q2": "Work on human figure and work on proportion. Give depth in the tiles.",
+    "Q3": "Work on depth in the poster, depth in the execution.",
+    "Q4": "Give depth in the shading and rendering techniques."
+   }
+  },
+  {
+   "student": "Vaidaihi",
+   "file": "7ceec28b-546c-4dee-813a-5a72a1891fab.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/7ceec28b-546c-4dee-813a-5a72a1891fab.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a2662f96dbf356a0491836e/ff1ffd78-4759-405c-b8e8-7a135877c791.pdf",
+   "faculty": {
+    "Q1": 11,
+    "Q2": 18,
+    "Q3": 13,
+    "Q4": 18
+   },
+   "faculty_total": 60,
+   "ai_before": {
+    "build": "64/65, the copy the Design team reviewed",
+    "copy": "REVIEW_7ceec28b... (Drive 182kC6TZY_CZWHzbgUH-Y8PJV7DAdWzO8)",
+    "marks": {
+     "Q1": 10,
+     "Q2": 15,
+     "Q3": 8.5,
+     "Q4": 11.5
+    }
+   },
+   "comments": {
+    "overall": "Good with ideation and presentation.",
+    "Q1": "Good with depth of description of logo. Well coloured and good execution.",
+    "Q2": "Good approach on the execution of solution. Good proportionate objects.",
+    "Q3": "Work on adding more details. Good with representation.",
+    "Q4": "Good product. Your product ideas are innovative and thoughtfully designed. The detailing and labeling in your sketches show great clarity."
+   }
+  },
+  {
+   "student": "Disha",
+   "file": "cb07f433-2260-4a3d-a4c0-88078987191d.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/cb07f433-2260-4a3d-a4c0-88078987191d.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a2fa69b0105c45ebb5dd672/d3d2897e-005d-4c7b-8612-95ba5a574db2.pdf",
+   "faculty": {
+    "Q1": 14,
+    "Q2": 15,
+    "Q3": 8,
+    "Q4": 17
+   },
+   "faculty_total": 54,
+   "comments": {
+    "overall": "You have good creative instincts and your logo design skills are comparatively stronger. However, you need to focus more on neatness, colour rendering, human anatomy, and presentation of work. Try to simplify your compositions and communicate one clear idea at a time.",
+    "Q1": "A good attempt with the logo design. The concept is nice, minimal, and very approachable. The logo successfully conveys a simple idea and has a clean appearance. Keep exploring more unique visual elements to make it even more memorable.",
+    "Q2": "Neatness needs improvement. Human anatomy requires more practice, especially proportions and body posture. The three-point perspective is a nice attempt and shows good understanding, but the composition can be refined further for better clarity and accuracy. Overall, a very good try.",
+    "Q3": "Too many elements and messages are competing for attention in the poster. Try to stick to one central concept and arrange the elements in a proper hierarchy. Colour rendering needs improvement, and negative spaces should be managed carefully. Adding a suitable background will make the poster more engaging.",
+    "Q4": "A good try with a nice overall approach. The idea is clear and the effort is appreciable. With better detailing, colour rendering, and presentation of work, the outcome can become much stronger. Keep experimenting with creative ideas."
+   }
+  },
+  {
+   "student": "Dolly",
+   "file": "79bea182-83b6-40c2-985a-49c6e9141d17.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/79bea182-83b6-40c2-985a-49c6e9141d17.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a76ed097e11f3cfeb3ed711/137b4145-4593-4139-90d7-7579c6a92994.pdf",
+   "faculty": {
+    "Q1": 10,
+    "Q2": 2,
+    "Q3": 0,
+    "Q4": 10
+   },
+   "faculty_total": 22,
+   "comments": {
+    "overall": "Work on depth in the execution.",
+    "Q1": "Work on depth in the rendering. Work on depth in execution.",
+    "Q2": "Work on perspective and work on human figures.",
+    "Q3": "Not attempted.",
+    "Q4": "Work on rendering techniques. Good work with execution."
+   }
+  },
+  {
+   "student": "Diya",
+   "file": "cbd38ee3-2e7d-4cec-9041-8b43072a085c.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/cbd38ee3-2e7d-4cec-9041-8b43072a085c.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a5a35694904e41c5c94ecab/9f4ffac6-f5a8-4c07-adcb-421ef5f1e179.pdf",
+   "faculty": {
+    "Q1": 11,
+    "Q2": 12,
+    "Q3": 11,
+    "Q4": 10
+   },
+   "faculty_total": 44,
+   "comments": {
+    "overall": "Work on depth of human figure and execution.",
+    "Q1": "Work on depth of typography. Good with ideation.",
+    "Q2": "Work on depth of human figure and posture. Practice animals rendering.",
+    "Q3": "Work on typography and work on space management. Idea is good.",
+    "Q4": "Add more perspective in the product drawing."
+   }
+  },
+  {
+   "student": "Kashish",
+   "file": "a7ac3f35-841b-4e8d-bfe7-889f186a2668.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/a7ac3f35-841b-4e8d-bfe7-889f186a2668.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a25801f3a2077ff05eeeeb5/dbe0f2a1-d8b9-4671-a8dd-e0d37fd9e065.pdf",
+   "faculty": {
+    "Q1": 9,
+    "Q2": 7,
+    "Q3": 9,
+    "Q4": 5
+   },
+   "faculty_total": 30,
+   "comments": {
+    "overall": "Your concepts are understandable, but greater attention is needed toward perspective, color rendering, typography, and presentation quality. Focus on creating visually engaging compositions with stronger technical execution.",
+    "Q1": "The logo design is neat and visually appealing. However, the color choices can be improved to better communicate the intended message. Typography and color rendering also need further refinement to enhance the overall presentation.",
+    "Q2": "The composition should have been drawn in three-point perspective, as the scene is shown from the viewpoint of a toy car placed on the floor. The child's height does not accurately match the age specified in the question. Animal anatomy also requires improvement. Focus on understanding perspective requirements before attempting the final composition.",
+    "Q3": "The poster design has potential but can be developed further. Stronger visuals, improved color selection, and better alignment of both text and illustrations would make the design more effective. Typography needs additional attention.",
+    "Q4": "The design appears basic and lacks detailed presentation. The color rendering is very flat and does not effectively communicate material textures. Work on using colors and shading techniques that make the object appear more three-dimensional and realistic."
+   }
+  },
+  {
+   "student": "Naitik",
+   "file": "3ad3c385-83db-4394-bc39-6067629fa456.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/3ad3c385-83db-4394-bc39-6067629fa456.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a2bf6566dbf356a04a145b3/27554a8c-c909-4b08-a686-4963ed630bd0.pdf",
+   "faculty": {
+    "Q1": 5,
+    "Q2": 10,
+    "Q3": 8,
+    "Q4": 8
+   },
+   "faculty_total": 31,
+   "comments": {
+    "overall": "You have good ideas, but presentation and creativity need more attention. Focus on understanding the question thoroughly before attempting it. Improve your logo design skills, perspective drawing, anatomy, and presentation techniques. Try to make your drawings more detailed, well-organized, and self-explanatory. Mention the question number properly.",
+    "Q1": "Work on your logo design. It should be neat, clean, and clearly reflect the main concept and requirement of the question. The logo should communicate the idea instantly and should be simple yet impactful.",
+    "Q2": "Your three-point perspective needs improvement. Human and animal anatomy require more practice, and the background appears incomplete. Add finer details and work on proportions to make the composition more realistic.",
+    "Q3": "The poster looks cluttered. The text lacks proper alignment and segmentation, and the illustrations are not used effectively. Add colours thoughtfully and improve your typography so that the poster looks more organized and visually appealing.",
+    "Q4": "The shoe design looks very basic and does not appear well thought out. Explain your concept with minimal labels and clearly show how your design fulfills the requirements mentioned in the question."
+   }
+  },
+  {
+   "student": "Jeni",
+   "file": "27a7fb4b-2438-4f69-8fc8-bba53e440196.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/27a7fb4b-2438-4f69-8fc8-bba53e440196.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a53cd09af7c096531da37e3/c0a669e1-f13e-4962-8c64-71d7a82ee835.pdf",
+   "faculty_raw": "19/20, 18/20, 17/20, 18/20 = 72: this faculty marked every question out of 20, not the paper's 15/20/15/20",
+   "faculty": {
+    "Q1": 14.25,
+    "Q2": 18,
+    "Q3": 12.75,
+    "Q4": 18
+   },
+   "faculty_total": 63,
+   "scaled": true,
+   "comments": {
+    "overall": "Your concepts are creative and well presented. Continue improving color balance, poster composition, and anatomy to further strengthen your visual communication.",
+    "Q1": "A very good attempt. A unique and creative logo has been designed. Well done.",
+    "Q2": "A nice attempt with a good understanding of three-point perspective. Animal anatomy requires some improvement.",
+    "Q3": "The concept is really nice, but the poster appears empty. Add colors and visual elements to make it more attractive and eye-catching.",
+    "Q4": "A good attempt. The explanation is clear, and the presentation is good. However, too many colors have been used; try to maintain a balanced color palette."
+   }
+  },
+  {
+   "student": "Shreya",
+   "file": "f354d601-8e52-46d4-bcd2-54fe07f0e6dd.pdf",
+   "student_url": "https://static.pw.live/5b09189f7285894d9130ccd0/f354d601-8e52-46d4-bcd2-54fe07f0e6dd.pdf",
+   "faculty_url": "https://d31ylp68pxdl2g.cloudfront.net/6a23e30c48f7bb3cede7d98b/6a982647790fd96d88855ffd/55adb798-0e4e-4eff-a545-41863389eb45.pdf",
+   "incomplete": "Only a logo was uploaded; faculty wrote 5/20 against a 15-mark question and gave no total. Not used for calibration.",
+   "faculty": {},
+   "comments": {
+    "Q1": "A very basic attempt at logo design. You need to work a lot on understanding the requirements of the question and developing stronger, more creative logo concepts."
+   }
+  }
+ ],
+ "ai_before_note": "ai_before is the AI copy the Design team reviewed (Drive links in their sheet). Earlier runs in the local job store differ by up to 2.5 marks a sheet."
+}

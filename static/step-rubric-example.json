@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "questions": [
+    {
+      "qid": "Q1",
+      "criteria": [
+        {
+          "criterion_id": "Q1.method",
+          "description": "Valid method and substitution",
+          "max_marks": 2,
+          "scoring_kind": "method",
+          "mark_increment": 0.5,
+          "marking_rule": "Accept equivalent valid methods. Award method credit for correct subsequent working after an earlier arithmetic error; do not deduct twice for that same error."
+        },
+        {
+          "criterion_id": "Q1.result",
+          "description": "Correct result and units",
+          "max_marks": 1,
+          "scoring_kind": "numeric",
+          "mark_increment": 0.5,
+          "marking_rule": "A matching final value alone does not establish that the method was valid."
+        }
+      ]
+    }
+  ]
+}

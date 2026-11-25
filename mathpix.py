@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import io
+import re
 from dataclasses import dataclass, field
 
 import pw_access
@@ -18,12 +19,43 @@ _LONE_LABELS = {f"({r})" for r in (
 )}
 
 
+def readable_ocr_text(text: str) -> str:
+    """Remove OCR's presentation wrappers without removing mathematical operators."""
+    value = str(text or "").strip()
+    for wrapper in (r"\(", r"\)", r"\[", r"\]"):
+        value = value.replace(wrapper, "")
+    # Repeat for nested presentation wrappers, but never unwrap a formula command.
+    for _ in range(3):
+        value = re.sub(r"\\(?:text|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}", r"\1", value)
+    value = re.sub(r"\\(?:left|right)\b", "", value)
+    return " ".join(value.split()).strip("$").strip()
+
+
+# A scanner app's footer printed under the photo: "Scanned with OKEN Scanner",
+# "Scanned with CamScanner". MEASURED 2026-09-06 (Maths, Rishita): it was the last
+# OCR line of Q15's region, and Q15's mark was drawn on it, below the photo.
+_SCANNER_MARK_RE = re.compile(
+    r"^\W*(?:scanned\s+(?:with|by|using)\b(?:\W+\w+){0,3}|camscanner)\W*$", re.IGNORECASE)
+
+
+def is_scanner_watermark(text: str) -> bool:
+    """A scanner app's printed footer, never the student's writing."""
+    return bool(_SCANNER_MARK_RE.match(readable_ocr_text(text)))
+
+
 def is_header_line(text: str) -> bool:
     """True if the line is a question/section header, not actual student working."""
-    s = text.strip().lower()
+    s = readable_ocr_text(text).lower()
     if not s:
         return True
-    if s.startswith(_HEADER_PREFIXES):
+    if is_scanner_watermark(s):
+        return True
+    # Q2 alone is a heading; Q2 (b) Vx < Vy contains the student's answer.
+    # The old prefix check labelled the entire latter line as non-evidence.
+    if re.fullmatch(r"(?:q(?:uestion)?|ans(?:wer)?|sol(?:ution)?)\s*(?:no\.?)?"
+                    r"\s*[-.:)#]*\s*\d{1,2}(?:\s*\([a-z0-9]+\)|"
+                    r"\s*\.\s*(?:[ivxlcdm]+|[a-z]|\d+)|"
+                    r"\s+(?:[ivxlcdm]+|[a-z]|\d+)[.)])*\s*[.):\-]*", s):
         return True
     if s.startswith(_SECTION_PREFIX) and len(s) <= 14:
         return True
@@ -32,6 +64,13 @@ def is_header_line(text: str) -> bool:
     if len(s) <= 5 and s.startswith("(") and s.endswith(")"):
         return True
     return False
+
+
+@dataclass
+class WordBox:
+    text: str
+    bbox: tuple[float, float, float, float]
+    confidence: float | None = None
 
 
 @dataclass
@@ -45,6 +84,11 @@ class LineBox:
     # crossed-out content (checked against the /v3/text reference). So we detect it
     # ourselves from the page image we already hold: see detect_struck_lines().
     cancelled: bool = False
+    confidence: float | None = None
+    kind: str = "text"
+    # Mathpix's own reading of whether this line is PRINTED (typed) rather than
+    # handwritten. A booklet made of printed lines is a document, not an answer sheet.
+    printed: bool = False
 
 
 @dataclass
@@ -53,6 +97,10 @@ class PageOCR:
     image_width: int                   # pixels of the PNG we sent to Mathpix
     image_height: int
     lines: list[LineBox] = field(default_factory=list)
+    words: list[WordBox] = field(default_factory=list)
+    # Set by pipeline.blank_scanned_page: a white scanned page with no handwriting
+    # (ruling and show-through only). An empty page that is blank is not "unread".
+    blank: bool = False
 
     def transcript(self) -> str:
         """Format as a labelled transcript Claude can reference by [line_id]."""
@@ -68,9 +116,14 @@ def pageocr_to_dict(p: "PageOCR") -> dict:
         "image_height": p.image_height,
         "lines": [
             {"line_id": l.line_id, "text": l.text, "bbox": list(l.bbox),
-             "page": l.page, "cancelled": bool(l.cancelled)}
+             "page": l.page, "cancelled": bool(l.cancelled),
+             "confidence": l.confidence, "kind": l.kind,
+             "printed": bool(getattr(l, "printed", False))}
             for l in p.lines
         ],
+        "words": [{"text": w.text, "bbox": list(w.bbox),
+                   "confidence": w.confidence} for w in p.words],
+        "blank": bool(getattr(p, "blank", False)),
     }
 
 
@@ -83,10 +136,59 @@ def pageocr_from_dict(d: dict) -> "PageOCR":
         lines=[
             LineBox(line_id=l["line_id"], text=l["text"],
                     bbox=tuple(l["bbox"]), page=int(l["page"]),
-                    cancelled=bool(l.get("cancelled", False)))
+                    cancelled=bool(l.get("cancelled", False)),
+                    confidence=_confidence(l.get("confidence")),
+                    kind=str(l.get("kind", "text")),
+                    printed=bool(l.get("printed", False)))
             for l in d.get("lines", [])
         ],
+        words=[WordBox(str(w["text"]), tuple(w["bbox"]),
+                       _confidence(w.get("confidence")))
+               for w in d.get("words", [])],
+        blank=bool(d.get("blank", False)),
     )
+
+
+def _confidence(value) -> float | None:
+    try:
+        value = float(value)
+        return value if 0 <= value <= 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def word_target_bbox(page: PageOCR, line: LineBox, target: str):
+    """Resolve a unique phrase using measured word contours, never character widths."""
+    def normalize(text):
+        return "".join(str(text).split()).casefold()
+
+    wanted = normalize(target)
+    if not wanted:
+        return None
+    x0, y0, x1, y1 = line.bbox
+    words = sorted((w for w in page.words
+                    if x0 - 2 <= (w.bbox[0] + w.bbox[2]) / 2 <= x1 + 2
+                    and y0 - 2 <= (w.bbox[1] + w.bbox[3]) / 2 <= y1 + 2),
+                   key=lambda w: w.bbox[0])
+    matches = []
+    for start in range(len(words)):
+        combined = ""
+        for end in range(start, len(words)):
+            combined += normalize(words[end].text)
+            if combined == wanted:
+                group = words[start:end + 1]
+                # Never concatenate words from different table rows merely
+                # because their x coordinates happen to be adjacent.
+                same_row = max(w.bbox[1] for w in group) < min(w.bbox[3] for w in group)
+                if same_row and all(w.confidence is None or w.confidence >= 0.8 for w in group):
+                    matches.append((min(w.bbox[0] for w in group),
+                                    min(w.bbox[1] for w in group),
+                                    max(w.bbox[2] for w in group),
+                                    max(w.bbox[3] for w in group)))
+                break
+            if not wanted.startswith(combined):
+                break
+    return matches[0] if len(matches) == 1 else None
 
 
 def _bbox_from_cnt(cnt: list[list[float]]) -> tuple[float, float, float, float]:
@@ -146,6 +248,137 @@ def _shrink_for_ocr(png_bytes: bytes) -> tuple[bytes, str, float]:
         return png_bytes, "image/png", 1.0
 
 
+def paper_crop(png_bytes: bytes):
+    """(enhanced png, (x0, y0), scale): the photo cropped to the paper, contrast
+    stretched and enlarged, for a second OCR read; None when nothing would change.
+
+    A page photographed small on a dark desk, or faint in poor light, came back
+    from Mathpix with 0 to 2 lines (Radiant Class 9 Maths, 2026-09-30: Akriti pages
+    7 and 8, Isha page 9, Shaarav page 5), and the answers on it were graded "not
+    attempted". Boxes read from the returned image map back to the original with
+    x = x0 + x' / scale.
+    """
+    import numpy as np
+    from PIL import ImageOps
+    img = Image.open(io.BytesIO(png_bytes)).convert("L")
+    arr = np.asarray(img, dtype=np.uint8)
+    h, w = arr.shape
+    # Paper is the bright part of the photo; the desk and shadows are darker.
+    bright = arr > (np.percentile(arr, 10) + np.percentile(arr, 90)) / 2
+    rows = np.flatnonzero(bright.mean(axis=1) > 0.35)
+    cols = np.flatnonzero(bright.mean(axis=0) > 0.35)
+    x0, y0, x1, y1 = 0, 0, w, h
+    if rows.size and cols.size:
+        y0, y1 = int(rows[0]), int(rows[-1]) + 1
+        x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    if (x1 - x0) < 0.2 * w or (y1 - y0) < 0.2 * h:
+        x0, y0, x1, y1 = 0, 0, w, h
+    crop = ImageOps.autocontrast(img.crop((x0, y0, x1, y1)), cutoff=2)
+    scale = min(3.0, 2400.0 / max(crop.size))
+    if scale > 1.05:
+        crop = crop.resize((int(crop.width * scale), int(crop.height * scale)))
+    else:
+        scale = 1.0
+    buf = io.BytesIO()
+    crop.convert("RGB").save(buf, format="PNG")
+    return buf.getvalue(), (x0, y0), scale
+
+
+def ocr_page_enhanced(png_bytes: bytes, page_num: int, *, google_token: str,
+                      task_id: str, filename: str = "") -> "PageOCR":
+    """ocr_page on the paper_crop of this photo, boxes in the ORIGINAL frame."""
+    enhanced, (x0, y0), scale = paper_crop(png_bytes)
+    page = ocr_page(enhanced, page_num, google_token=google_token, task_id=task_id,
+                    filename=filename)
+    width, height = Image.open(io.BytesIO(png_bytes)).size
+
+    def back(b):
+        return (x0 + b[0] / scale, y0 + b[1] / scale, x0 + b[2] / scale, y0 + b[3] / scale)
+
+    for line in page.lines:
+        line.bbox = back(line.bbox)
+    for word in page.words:
+        word.bbox = back(word.bbox)
+    page.image_width, page.image_height = width, height
+    return page
+
+
+SPREAD_ASPECT = 1.20          # a photo this wide may hold two facing pages
+_FOLD_SEARCH = (0.30, 0.70)   # where the fold between them can be
+
+
+def spread_fold(lines, width: float) -> float | None:
+    """x of the fold on a photo of two facing pages, or None when there is none.
+
+    Found from the text itself: the x that the fewest lines run across, with lines
+    on both sides of it. A page whose writing runs across the middle has no fold.
+    """
+    if len(lines) < 4 or width <= 0:
+        return None
+    # Search within the writing, not the page: a photo of an open notebook is often
+    # placed on a portrait page with blank paper around it (Sonakshi's Biology copy,
+    # 2026-09-30), and the fold then sits far from the page's middle.
+    left_edge = min(ln.bbox[0] for ln in lines)
+    span = max(ln.bbox[2] for ln in lines) - left_edge
+    if span <= 0:
+        return None
+    lo, hi = _FOLD_SEARCH
+    best, best_cross, best_step = None, None, 50
+    for step in range(int(lo * 100), int(hi * 100) + 1):
+        x = left_edge + span * step / 100
+        cross = sum(1 for ln in lines if ln.bbox[0] < x < ln.bbox[2])
+        left = sum(1 for ln in lines if ln.bbox[2] <= x)
+        right = sum(1 for ln in lines if ln.bbox[0] >= x)
+        if left < 2 or right < 2:
+            continue
+        if best_cross is None or cross < best_cross or (
+                cross == best_cross and abs(step - 50) < abs(best_step - 50)):
+            best, best_cross, best_step = x, cross, step
+    if best is None or best_cross > max(1, 0.1 * len(lines)):
+        return None
+    return best
+
+
+def looks_like_spread(lines, width: float, height: float) -> bool:
+    """A wide page, or wide writing on any page (a landscape photo of an open
+    notebook placed on a portrait page)."""
+    if width / max(height, 1) >= SPREAD_ASPECT:
+        return True
+    if len(lines) < 8:
+        return False
+    x0 = min(ln.bbox[0] for ln in lines)
+    x1 = max(ln.bbox[2] for ln in lines)
+    y0 = min(ln.bbox[1] for ln in lines)
+    y1 = max(ln.bbox[3] for ln in lines)
+    return (x1 - x0) / max(y1 - y0, 1) >= SPREAD_ASPECT
+
+
+def order_spread_lines(lines, width: float, page_num: int):
+    """Left page's lines first, then the right page's, renumbered in that order.
+
+    OCR orders lines by height on the photo, which interleaves two facing pages and
+    hands the grader a scrambled answer (30 of 46 questions "not attempted" on a
+    Class 12 Chemistry copy). Lines are never cut: one running across the fold keeps
+    its place on the side where it starts.
+    """
+    fold = spread_fold(lines, width)
+    if fold is None:
+        return lines
+    centre = lambda ln: (ln.bbox[0] + ln.bbox[2]) / 2
+    ordered = ([ln for ln in lines if centre(ln) < fold]
+               + [ln for ln in lines if centre(ln) >= fold])
+    if [ln.line_id for ln in ordered] == [ln.line_id for ln in lines]:
+        return lines
+    counters = {"L": 0, "D": 0}
+    for ln in ordered:
+        kind = "D" if ln.line_id.startswith(f"P{page_num}D") else "L"
+        counters[kind] += 1
+        ln.line_id = f"P{page_num}{kind}{counters[kind]}"
+    print(f"[ocr] page {page_num}: two facing pages, read left page first "
+          f"(fold at {fold / width:.0%})", flush=True)
+    return ordered
+
+
 def ocr_page(
     png_bytes: bytes,
     page_num: int,
@@ -168,7 +401,12 @@ def ocr_page(
     payload = {
         "src": f"data:{mime};base64," + base64.standard_b64encode(send_bytes).decode("utf-8"),
         "formats": ["text"],
+        # Mathpix rejects line data and word data in the same request. Line
+        # geometry is required for question ownership and step marks; optional
+        # word-level highlights must not break OCR or add an unbudgeted call.
         "include_line_data": True,
+        # Orientation is normalized before OCR; contours must remain in that frame.
+        "auto_rotate_confidence_threshold": 1,
         # leave math_inline_delimiters / math_display_delimiters at defaults
     }
     if not google_token or not task_id:
@@ -200,9 +438,12 @@ def ocr_page(
 
     lines: list[LineBox] = []
     for idx, ld in enumerate(data.get("line_data", []), start=1):
-        if ld.get("type") not in ("text", "math"):
+        kind = ld.get("type", "text")
+        visual = kind in ("diagram", "chart", "table")
+        if kind not in ("text", "math", "figure_label") and not visual:
             continue
-        text = (ld.get("text") or "").strip()
+        text = (ld.get("text") or ld.get("latex") or
+                (f"[detected {kind}]" if visual else "")).strip()
         if not text:
             continue
         cnt = ld.get("cnt")
@@ -213,13 +454,25 @@ def ocr_page(
             # Bboxes are in sent-(downscaled)-image coords; map back to the original.
             bbox = tuple(v / scale for v in bbox)
         lines.append(LineBox(
-            line_id=f"P{page_num}L{idx}",
+            line_id=f"P{page_num}{'D' if visual else 'L'}{idx}",
             text=text,
             bbox=bbox,
             page=page_num,
+            confidence=_confidence(ld.get("confidence")),
+            kind=kind,
+            printed=bool(ld.get("is_printed")) and not bool(ld.get("is_handwritten")),
         ))
 
-    return PageOCR(page=page_num, image_width=width, image_height=height, lines=lines)
+    if width and height and looks_like_spread(lines, width, height):
+        lines = order_spread_lines(lines, width, page_num)
+    words = [WordBox(
+        text=str(w.get("text") or w.get("latex") or ""),
+        bbox=tuple(v / scale for v in _bbox_from_cnt(w["cnt"])),
+        confidence=_confidence(w.get("confidence")),
+    ) for w in data.get("word_data", []) if w.get("cnt")
+             and (w.get("text") or w.get("latex"))]
+    return PageOCR(page=page_num, image_width=width, image_height=height,
+                   lines=lines, words=words)
 
 
 # Pages are independent and each call is I/O-bound on the proxy (~2-4s), so this is
@@ -278,8 +531,9 @@ def _row_ink_coverage(gray, x0: int, y: int, x1: int, threshold: int) -> float:
     width = x1 - x0
     if width <= 0:
         return 0.0
-    dark = sum(1 for x in range(x0, x1) if gray[x, y] < threshold)
-    return dark / width
+    # One count over the row: pixel by pixel in Python this took a quarter of a live run's
+    # working time on 1 Nov 2026, as it runs for every row of every line of every page.
+    return int((gray[y, x0:x1] < threshold).sum()) / width
 
 
 def _row_ink_run(gray, x0: int, y: int, x1: int, threshold: int) -> float:
@@ -292,8 +546,8 @@ def _row_ink_run(gray, x0: int, y: int, x1: int, threshold: int) -> float:
     if width <= 0:
         return 0.0
     best = current = gap = 0
-    for x in range(x0, x1):
-        if gray[x, y] < threshold:
+    for dark in (gray[y, x0:x1] < threshold).tolist():
+        if dark:
             current += gap + 1
             gap = 0
             if current > best:
@@ -333,7 +587,8 @@ def detect_struck_lines(page_png: bytes, lines: list[LineBox],
         img = Image.open(io.BytesIO(page_png)).convert("L")
     except Exception:
         return set()
-    gray = img.load()
+    import numpy as np
+    gray = np.asarray(img)
     w, h = img.size
     struck: set[str] = set()
     for ln in lines:
@@ -377,6 +632,112 @@ def detect_struck_lines(page_png: bytes, lines: list[LineBox],
             struck.add(ln.line_id)
             break
     return struck
+
+
+# A student's label at the start of a line: "Q1 A) Partners", "(3) Interest",
+# "Ans 4.", "5) B", "10". The number must end there (a delimiter, a space or the
+# line's end), so working such as "96000 - 60000" is never read as question 96.
+_LABEL_RE = re.compile(
+    r"^\s*(?:q(?:ues(?:tion)?)?|ans(?:wer)?)?\.?\s*[\(\[]?\s*(\d{1,2})(?=\s*[\)\]\.:\-]|\s|$)",
+    re.IGNORECASE)
+
+
+def booklet_is_typed(ocr_pages) -> tuple[bool, int, int]:
+    """Whether the booklet is a printed or typed document: (typed?, printed, handwritten).
+
+    Mathpix marks every line it reads as printed or handwritten. An answer sheet
+    is handwritten through; a printed worksheet with the student's answers written
+    in still carries many handwritten lines. So a booklet is a document when it
+    has ten or more printed lines of real length and at most a tenth of its lines
+    (never more than three) are handwritten.
+    """
+    printed = handwritten = 0
+    for page in list(ocr_pages or []):
+        for line in list(getattr(page, "lines", None) or []):
+            if str(getattr(line, "kind", "text") or "text") != "text":
+                continue
+            if len(str(getattr(line, "text", "") or "").split()) < 3:
+                continue
+            if getattr(line, "printed", False):
+                printed += 1
+            else:
+                handwritten += 1
+    total = printed + handwritten
+    typed = printed >= 10 and handwritten <= max(3, int(0.1 * total))
+    return typed, printed, handwritten
+
+
+def question_labels_found(ocr_pages, numbers) -> int:
+    """How many of the paper's question numbers the student labelled an answer with."""
+    wanted = {int(n) for n in numbers}
+    found: set[int] = set()
+    for page in list(ocr_pages or []):
+        for line in list(getattr(page, "lines", None) or []):
+            match = _LABEL_RE.match(readable_ocr_text(str(getattr(line, "text", "") or "")))
+            if match and int(match.group(1)) in wanted:
+                found.add(int(match.group(1)))
+    return len(found)
+
+
+def lines_run_vertically(page: "PageOCR") -> tuple[bool, int, int]:
+    """Whether this page's writing was read sideways: (sideways?, tall lines, lines).
+
+    On an upright page a line of handwriting is a wide, low box. When the page is
+    fed to OCR sideways the same lines come back as tall, narrow boxes with
+    unreadable text: on the Accountancy copy c0f259bb (2026-09-17) the orientation
+    probe turned two upright pages by 90 degrees and every one of their OCR lines
+    was over four times taller than wide. Three or more such lines making up at
+    least 60% of the page's text lines is the signal; a lone tall box (a bracket,
+    a column of figures) is not.
+    """
+    tall = total = 0
+    for line in list(getattr(page, "lines", None) or []):
+        if str(getattr(line, "kind", "text") or "text") != "text":
+            continue
+        text = str(getattr(line, "text", "") or "").strip()
+        if len(text) < 3:
+            continue
+        x0, y0, x1, y1 = line.bbox
+        w, h = max(1.0, float(x1 - x0)), max(1.0, float(y1 - y0))
+        total += 1
+        if h > 1.6 * w:
+            tall += 1
+    return (tall >= 3 and tall >= 0.6 * total), tall, total
+
+
+# An answer list is many short tokens. "(47) A" is six characters and its box is
+# roughly square whichever way up the page is, so the tall-and-narrow test above
+# cannot judge such a page at all - it is not evidence of uprightness, it is an
+# absence of evidence.
+_SHORT_TOKEN_CHARS = 8
+_SHORT_TOKEN_SHARE = 0.7
+_SHORT_TOKEN_MIN_LINES = 8
+
+
+def short_token_page(page: "PageOCR") -> bool:
+    """Whether this page is mostly short tokens, so line shape cannot judge its turn.
+
+    MEASURED 18 Nov 2026, Bihar Board Class 11 Economics row 164: page 1 is a
+    photograph of a ruled notebook page holding fifty MCQ answers written as "(47) A".
+    Taken sideways, the printed rules run across the image and look exactly like lines
+    of text, so the free orientation heuristic scored it 0.805 upright against -0.619
+    for a quarter turn - confidently backwards. lines_run_vertically did not catch it
+    either: these boxes are not tall and narrow. The page was graded sideways, its
+    letters misread, and the copy came out 21 marks above the evaluator, crediting a
+    question whose answer was A against a key of B and one the student left blank.
+    """
+    short = total = 0
+    for line in list(getattr(page, "lines", None) or []):
+        if str(getattr(line, "kind", "text") or "text") != "text":
+            continue
+        text = str(getattr(line, "text", "") or "").strip()
+        if not text:
+            continue
+        total += 1
+        if len(text) <= _SHORT_TOKEN_CHARS:
+            short += 1
+    return (total >= _SHORT_TOKEN_MIN_LINES
+            and short >= _SHORT_TOKEN_SHARE * total)
 
 
 def mark_struck_lines(page: "PageOCR", page_png: bytes, scale: float = 1.0) -> int:
@@ -455,6 +816,12 @@ def synthesize_diagram_regions(page: PageOCR, min_gap_px: int = 180) -> PageOCR:
     lines. OCR can't see hand-drawn diagrams, but a wide blank band between
     text lines is almost always a figure — give it an anchor like 'P7D1' so
     the grader can target it.
+
+    The page keeps the reading order the OCR (and order_spread_lines) gave it; each
+    new region goes in just before the line under its gap. Re-sorting the whole page
+    by height undid that order (Parishram Chemistry, 2026-09-20): the two pages of a
+    notebook photo were interleaved row by row, and a reaction scheme drawn a few
+    pixels above its "(9)" label was handed to the answer before it.
     """
     text_lines = [l for l in page.lines if not l.line_id.startswith(f"P{page.page}D")]
     if not text_lines:
@@ -465,19 +832,31 @@ def synthesize_diagram_regions(page: PageOCR, min_gap_px: int = 180) -> PageOCR:
     diag_idx = 1
     margin_x = max(40, W // 30)
     new_lines: list[LineBox] = []
+    before: dict[int, list[LineBox]] = {}
     for line in sorted_lines[1:]:
         y0 = line.bbox[1]
-        if y0 - prev_bottom >= min_gap_px:
+        detected_in_gap = any(l.kind in {"diagram", "chart", "table"}
+                              and l.bbox[1] < y0 and l.bbox[3] > prev_bottom
+                              for l in page.lines)
+        if y0 - prev_bottom >= min_gap_px and not detected_in_gap:
+            while any(l.line_id == f"P{page.page}D{diag_idx}" for l in page.lines):
+                diag_idx += 1
             new_lines.append(LineBox(
                 line_id=f"P{page.page}D{diag_idx}",
                 text="[diagram region — likely a figure/diagram/table the OCR could not transcribe]",
                 bbox=(margin_x, prev_bottom + 8, W - margin_x, y0 - 8),
                 page=page.page,
+                kind="synthetic_region",
             ))
+            before.setdefault(id(line), []).append(new_lines[-1])
             diag_idx += 1
         prev_bottom = max(prev_bottom, line.bbox[3])
-    page.lines.extend(new_lines)
-    page.lines.sort(key=lambda l: l.bbox[1])
+    if new_lines:
+        ordered: list[LineBox] = []
+        for line in page.lines:
+            ordered.extend(before.get(id(line), ()))
+            ordered.append(line)
+        page.lines[:] = ordered
     return page
 
 

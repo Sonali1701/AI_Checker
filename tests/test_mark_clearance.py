@@ -18,6 +18,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pdf_renderer import (_MIN_DROP_BAND, _clear_x_for_mark, disc_ink_fraction,
                           student_ink_mask)
 
+# A legacy-contract suite: marks stay inside the sheet and within reach of their
+# evidence row, and checking plans are drawn. The teacher layout (the product
+# default) has its own contract in test_teacher_layout.py.
+import pdf_renderer as _pr
+_pr.TEACHER_LAYOUT = False
+
 
 def clear_x(*a, **k):
     """Just the x, for the cases that must not move vertically."""

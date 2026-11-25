@@ -188,7 +188,8 @@ def best_line(step: str, candidates, *, exclude: set[str] | None = None,
     return best, best_score
 
 
-def resolve_steps(criteria, band_lines, *, model_anchor_ok) -> list[AnchorResolution]:
+def resolve_steps(criteria, band_lines, *, model_anchor_ok,
+                  require_evidence: bool = False, verified_indices=()) -> list[AnchorResolution]:
     """Decide where every criterion of one question is marked.
 
     `band_lines`  the question's own lines, in reading order — the only places
@@ -212,6 +213,8 @@ def resolve_steps(criteria, band_lines, *, model_anchor_ok) -> list[AnchorResolu
     nobody chose.
     """
     criteria = list(criteria or [])
+    if require_evidence:
+        return _resolve_evidenced_steps(criteria, band_lines, model_anchor_ok, set(verified_indices))
     out = [AnchorResolution() for _ in criteria]
     texts = [step_text(c) for c in criteria]
     by_lid = {str(line.get("lid") or ""): line for line in band_lines}
@@ -251,6 +254,122 @@ def resolve_steps(criteria, band_lines, *, model_anchor_ok) -> list[AnchorResolu
             continue
         out[index] = AnchorResolution(
             line_id=str(line.get("lid") or ""), score=score, source="resolved")
+    return out
+
+
+def canonical_line_id(value: str) -> str:
+    """Accept harmless bracket/case/spacing differences, never select among IDs."""
+    match = re.fullmatch(r"\[?\s*p\s*(\d+)\s*([ld])\s*(\d+)\s*\]?", str(value or ""), re.I)
+    return f"P{int(match[1])}{match[2].upper()}{int(match[3])}" if match else str(value or "").strip()
+
+
+def _quote_score(quote: str, text: str) -> float:
+    def normalized(value):
+        from mathpix import readable_ocr_text
+        value = readable_ocr_text(value).casefold()
+        # Arrows too: a student's "B -> Prairies" comes back from Mathpix as
+        # "\( B \rightarrow \) Praiwes" (Parishram Geography, 8 Oct 2026).
+        symbols = {"lt": "<", "gt": ">", "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥",
+                   "neq": "≠", "times": "×", "cdot": "·", "rightarrow": "→", "to": "→",
+                   "longrightarrow": "→", "leftarrow": "←", "longleftarrow": "←"}
+        value = re.sub(r"\\([a-z]+)\b", lambda m: symbols.get(m[1], m[0]), value)
+        value = re.sub(r"([a-z])_\{([a-z0-9]+)\}", r"\1\2", value)
+        value = re.sub(r"([a-z])_([a-z0-9])\b", r"\1\2", value)
+        value = re.sub(r"\s*([<>=≤≥≠×·+])\s*", r"\1", value)
+        return re.sub(r"\s+", " ", value).strip()
+    quote, text = normalized(quote), normalized(text)
+    if not quote or not text:
+        return 0.0
+    # Word boundaries prevent a quoted 100 from matching 1000. Preserve signs and
+    # decimals; numeric containment is useful for legacy recovery, not certification.
+    numeric = bool(re.fullmatch(r"[+-]?\d+(?:\.\d+)?", quote))
+    left, right = (r"(?<![\w.+-])", r"(?![\w.])") if numeric else (r"(?<!\w)", r"(?!\w)")
+    if re.search(left + re.escape(quote) + right, text):
+        return 2.0
+    # The grader quotes a phrase as it reads it, and a sentence runs on across OCR
+    # lines: "There was a network of spies, who told..." is two lines on the sheet,
+    # and the line the grader cited holds only its first half. MEASURED 2026-09-16
+    # on the SST review batch: 21 of 27 descriptive steps on one copy were drawn
+    # nowhere because their quote crossed a line break. Half the quote, at least
+    # three words of it, at either end of the cited line is the grader's evidence;
+    # a number on its own still needs an exact, whole-token match.
+    if numeric:
+        return 0.0
+    words = quote.split(" ")
+    if len(words) >= 4:
+        take = max(3, len(words) // 2)
+        for part in (" ".join(words[:take]), " ".join(words[-take:])):
+            if len(part) >= 10 and re.search(left + re.escape(part) + right, text):
+                return 1.5
+    # A narrow table column can wrap a quoted sentence onto more than two
+    # lines. An exact three-word edge with two content words identifies the
+    # written line more strongly than fuzzy similarity to a column heading.
+    # Ambiguous/repeated matches remain the caller's responsibility.
+    if len(words) >= 6:
+        for part in (" ".join(words[:3]), " ".join(words[-3:])):
+            if (len(word_tokens(part)) >= 2
+                    and re.search(left + re.escape(part) + right, text)):
+                return 1.5
+    # OCR misreads a hand it cannot follow: "Structural Plains - Formed due to
+    # uplift" came back as "Servitured Plains - Formed abreto expert", at a
+    # confidence of 0.01, while the grader had read the image and quoted the real
+    # words. The quote and the line still share most of their letters in order.
+    # This tier only ever confirms the line the grader itself cited; it is too
+    # loose to move a step to a different line (see _resolve_evidenced_steps).
+    if len(quote) >= 12 and _partial_similarity(quote, text) >= .6:
+        return 1.0
+    return 0.0
+
+
+def _partial_similarity(needle: str, haystack: str) -> float:
+    """Best match of the shorter string against a window of the longer one."""
+    from difflib import SequenceMatcher
+    short, long = (needle, haystack) if len(needle) <= len(haystack) else (haystack, needle)
+    if not short or not long:
+        return 0.0
+    if len(long) <= len(short) + 2:
+        return SequenceMatcher(None, short, long).ratio()
+    width = len(short) + 2
+    best = 0.0
+    step = max(1, len(short) // 6)
+    for start in range(0, len(long) - width + 1 + step, step):
+        window = long[start:start + width]
+        best = max(best, SequenceMatcher(None, short, window).ratio())
+        if best >= .95:
+            break
+    return best
+
+
+def _resolve_evidenced_steps(criteria, band_lines, model_anchor_ok, verified):
+    by_id = {line["lid"]: line for line in band_lines}
+    out = []
+    for index, criterion in enumerate(criteria):
+        lid = canonical_line_id(getattr(criterion, "step_line_id", ""))
+        quote = str(getattr(criterion, "anchor_quote", "") or "")
+        candidates = [line for line in band_lines
+                      if model_anchor_ok(line["lid"], criterion)
+                      and _quote_score(quote, line.get("text", "")) > 0]
+        own = by_id.get(lid)
+        # A step moves to a line the grader did not cite only on a firm match:
+        # exact, or half the quote at one end of the line. The fuzzy tier that
+        # confirms a garbled cited line is not evidence enough to re-home a step.
+        firm = [line for line in candidates
+                if _quote_score(quote, line.get("text", "")) >= 1.5]
+        if own is not None and model_anchor_ok(lid, criterion) and index in verified:
+            out.append(AnchorResolution(lid, 2.0, "model", "independently verified image evidence"))
+        elif own is not None and any(line["lid"] == lid for line in candidates):
+            out.append(AnchorResolution(lid, 2.0, "model", "student quote matches this line"))
+        elif len(firm) == 1:
+            out.append(AnchorResolution(firm[0]["lid"], 2.0, "resolved", "unique student quote"))
+        elif own is not None and model_anchor_ok(lid, criterion) and quote.strip():
+            # The grader cited a line of this answer and quoted words OCR cannot
+            # find on any line of it (a hand OCR gave up on, or a quote that runs
+            # across three lines). The grader read the image; the line is on the
+            # answer; a tick beside it says what the grader said. Leaving the step
+            # unmarked said nothing - 2026-09-16, ten copies, "missing number".
+            out.append(AnchorResolution(lid, 0.5, "model", "grader's line; quote not confirmed by OCR"))
+        else:
+            out.append(AnchorResolution(reason="ambiguous or missing student evidence"))
     return out
 
 

@@ -146,15 +146,15 @@ class BudgetPolicy:
 
     @classmethod
     def for_copy(cls, *, total_marks: float | None, exam_type: str,
-                 subject: str = "") -> "BudgetPolicy":
+                 subject: str = "", category: str = "") -> "BudgetPolicy":
         try:
             marks = float(total_marks) if total_marks is not None else 0.0
         except (TypeError, ValueError):
             marks = 0.0
         if not math.isfinite(marks) or not (marks > 0):
             raise ValueError("A finite positive paper total is required for a hard budget.")
-        cap = budget_for(marks, exam_type=exam_type, subject=subject)
-        commercial = is_professional_or_commerce(
+        cap = budget_for(marks, exam_type=exam_type, subject=subject, category=category)
+        commercial = category in ("ca", "commerce") or is_professional_or_commerce(
             exam_type=exam_type, subject=subject)
         target = cap - (1.0 if commercial else 2.0)
         return cls(

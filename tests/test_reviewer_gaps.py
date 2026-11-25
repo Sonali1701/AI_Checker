@@ -29,6 +29,12 @@ from mathpix import (LineBox, PageOCR, build_transcript, pageocr_from_dict,
                      pageocr_to_dict)
 from pdf_renderer import _is_total_criterion, _is_total_row, build_evaluated_pdf
 
+# A legacy-contract suite: marks stay inside the sheet and within reach of their
+# evidence row, and checking plans are drawn. The teacher layout (the product
+# default) has its own contract in test_teacher_layout.py.
+import pdf_renderer as _pr
+_pr.TEACHER_LAYOUT = False
+
 FAILS = []
 
 
@@ -130,8 +136,11 @@ try:
                         student_pngs=[], report=partial, ocr_pages=ocr(ROWS),
                         mark_scale=1.0)
     check("the fully earned step is ticked", len(ticks) >= 1, f"{len(ticks)} ticks")
-    check("the PARTIAL step is not ticked", len(ticks) == 1,
-          f"{len(ticks)} ticks for one full + one partial step")
+    # Since 2026-10-07 (tests/test_partial_credit_glyphs.py) positive partial credit
+    # uses the same single tick as full credit; its circled award and the reason
+    # in the margin say what was lost. An attempted zero is a cross.
+    check("the partial step is ticked like the full one, its circle says 0.5",
+          len(ticks) == 2, f"{len(ticks)} ticks for one full + one partial step")
     check("both steps still show their marks", {"0.5", "1"} <= set(circles), circles)
 finally:
     pdf_renderer._draw_tick, pdf_renderer._draw_number_in_circle = _real_tick, _real_circle
@@ -160,7 +169,8 @@ out = fitz.open(stream=pdf, filetype="pdf")
 page_text = out[0].get_text()
 sheet_only = " ".join(
     sp["text"] for b in out[0].get_text("dict")["blocks"] for l in b.get("lines", [])
-    for sp in l["spans"] if sp["bbox"][0] < out[0].rect.width * 0.72)
+    for sp in l["spans"]
+    if fitz.Rect(report4.render_page_layouts["1"]["content_bbox"]).contains(fitz.Rect(sp["bbox"])))
 check("the question total is NOT printed over the answer",
       "3/4" not in sheet_only, f"sheet text: {sheet_only!r}")
 check("the strip still carries its own entry", "Q1" in page_text)

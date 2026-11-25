@@ -1,0 +1,29 @@
+{
+  "source": "PW Vidyapeeth PRD sheet 1BVAdNTBmeLiqT45lSIrXRmAjFmwNBdQ8mi4-v54UtHg, 'The new fields we need', 15 Oct 2026",
+  "boards": ["CBSE", "ICSE", "ISC", "STATE BOARD"],
+  "verticals": ["VP", "PS", "TC"],
+  "courses": ["Foundation"],
+  "classes": ["6", "7", "8", "9", "10", "11", "12"],
+  "centres": [
+    "Delhi - Kalusarai Vidyapeeth",
+    "Patna - Saguna Vidyapeeth (Tuition Center)",
+    "Hyderabad - AS RAO NAGAR Vidyapeeth",
+    "Patna Vidyapeeth (Residential Program)",
+    "Mumbai - Chembur Vidyapeeth",
+    "Vadodara - Sama Savli Vidyapeeth",
+    "Delhi - Janakpuri Vidyapeeth",
+    "Delhi - NSP Vidyapeeth",
+    "Mumbai - Thane Vidyapeeth",
+    "Delhi - Punjabibagh Vidyapeeth",
+    "Jaipur - RS Circle Vidyapeeth",
+    "Agra Vidyapeeth",
+    "Lucknow - Alambagh Vidyapeeth",
+    "Mumbai - Nerul Vidyapeeth",
+    "Prayagraj - Civil Lines Vidyapeeth",
+    "Gorakhpur - Medical Road Vidyapeeth",
+    "Howrah Vidyapeeth"
+  ],
+  "subjects": ["Physics", "Chemistry", "Biology", "Science", "Maths", "SST", "English", "Urdu", "Hindi",
+               "History", "Political Science", "Geography", "Economics", "Sociology", "Sanskrit"],
+  "modes": ["English", "Hindi", "Hinglish", "Urdu", "Gujrati", "Marathi", "Bengali"]
+}

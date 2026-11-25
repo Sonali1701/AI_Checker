@@ -29,6 +29,34 @@ from PIL import Image, ImageOps
 _THUMB = 240
 
 
+def writing_probe_image(png: bytes) -> bytes:
+    """Remove a large uniform white frame for the orientation probe only.
+
+    Embedded notebook photos can occupy less than half of a portrait PDF page.
+    Keeping that canvas in a 900-pixel probe hides the letter tops. Source pages
+    and OCR coordinates retain their complete canvas.
+    """
+    try:
+        import numpy as np
+        image = ImageOps.exif_transpose(Image.open(BytesIO(png))).convert("RGB")
+        gray = np.asarray(image.convert("L"))
+        mask = gray < 230
+        rows, cols = np.where(mask)
+        if not len(rows):
+            return png
+        pad = max(2, round(min(image.size) * .01))
+        x0, y0 = max(0, int(cols.min()) - pad), max(0, int(rows.min()) - pad)
+        x1, y1 = min(image.width, int(cols.max()) + pad + 1), min(image.height, int(rows.max()) + pad + 1)
+        share = (x1 - x0) * (y1 - y0) / (image.width * image.height)
+        if not .12 <= share <= .85 or min(x1 - x0, y1 - y0) < 100:
+            return png
+        buf = BytesIO()
+        image.crop((x0, y0, x1, y1)).save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return png
+
+
 def _to_thumb(img: Image.Image) -> Image.Image:
     g = img.convert("L")
     w, h = g.size
@@ -111,6 +139,35 @@ def detect_rotation(img: Image.Image, min_margin: float = 0.12) -> int:
         return 0
     # Only act if rotating is decisively better than doing nothing.
     return best if (scores[best] - scores[0]) >= min_margin else 0
+
+
+def sideways_angle(img: Image.Image) -> int:
+    """For a page KNOWN to be sideways, which quarter turn (90 or 270 CCW) rights it.
+
+    The free heuristic cannot tell upright from sideways reliably, but between the
+    two sideways answers it only has to compare left-to-right against right-to-left
+    reading, which its top-heavy and left-heavy terms do decide. Used when the OCR
+    has shown the page sideways and the model probe has not named a quarter turn.
+    """
+    img = ImageOps.exif_transpose(img)
+    g0 = _to_thumb(img)
+    return 90 if _uprightness(g0.rotate(90, expand=True)) >= _uprightness(g0.rotate(270, expand=True)) else 270
+
+
+# A page's direction is all the probe looks for, and it shrinks each page to 900 pixels first.
+# Live run of 1 Nov 2026: a copy of 54 pictures, 2880 x 1620 points each, came to 20 megapixels a
+# page at 150 dpi: 3.8 s a page with every other copy held behind it, and 1 GB of images in memory.
+_LOOK_MAX_EDGE = 2000
+
+
+def _page_to_look_at(page, dpi: int) -> bytes:
+    """One page as a PNG for judging its direction. Pillow writes it, not MuPDF: MuPDF's PNG writer
+    keeps every other thread waiting, and the pixels are the same."""
+    longest = max(page.rect.width, page.rect.height, 1) * dpi / 72
+    pix = page.get_pixmap(dpi=max(1, min(dpi, int(dpi * _LOOK_MAX_EDGE / longest))))
+    buf = BytesIO()
+    Image.frombytes("RGB", (pix.width, pix.height), pix.samples).save(buf, format="PNG", compress_level=1)
+    return buf.getvalue()
 
 
 def _png_upright(page_png: bytes, angle: int) -> bytes:
@@ -215,7 +272,7 @@ def normalize_orientation(data: bytes, filename: str, rotations=None,
     is_pdf = lower.endswith(".pdf")
     if is_pdf:
         doc = fitz.open(stream=data, filetype="pdf")
-        page_pngs = [doc[i].get_pixmap(dpi=dpi).tobytes("png") for i in range(doc.page_count)]
+        page_pngs = [_page_to_look_at(doc[i], dpi) for i in range(doc.page_count)]
     else:
         page_pngs = [data]
     n = len(page_pngs)
@@ -243,11 +300,11 @@ def normalize_orientation(data: bytes, filename: str, rotations=None,
         return _png_upright(data, rots[0]), rots, True
 
     out = fitz.open()
-    for i, png in enumerate(page_pngs):
+    for i in range(n):
         if rots[i] == 0:
             out.insert_pdf(doc, from_page=i, to_page=i)          # keep original page as-is
         else:
-            up = _jpeg_upright(png, rots[i])
+            up = _jpeg_upright(doc[i].get_pixmap(dpi=dpi).tobytes("png"), rots[i])
             img = fitz.open(stream=up, filetype="jpeg")
             rect = img[0].rect
             pg = out.new_page(width=rect.width, height=rect.height)
@@ -311,13 +368,45 @@ def _gutter_x(img: "Image.Image") -> int:
     return lo + int(np.median(flat))
 
 
+_CROSSING_ROWS = 0.20   # share of text rows running straight through the cut
+
+
+def _writing_crosses(img: "Image.Image", cut: int) -> bool:
+    """Whether the handwriting runs straight across the proposed fold.
+
+    Two facing pages each keep a margin at the binding, so just left and just right
+    of a real fold there is paper, whatever the fold line itself looks like. A single
+    page photographed wide has its lines running through the middle. CA 2026-09-19:
+    a portrait Corporate Law page shot in a landscape frame was cut down the middle,
+    every line of the Q2(a) answer split across two pages, and the half-lines graded.
+    """
+    import numpy as np
+
+    g = np.asarray(img.convert("L"), dtype=np.uint8)
+    h, w = g.shape
+    band = g[int(h * 0.12):int(h * 0.88)]
+    near, far = max(2, int(w * 0.005)), max(6, int(w * 0.02))
+    left = (band[:, max(0, cut - far):max(0, cut - near)] < 140).any(axis=1)
+    right = (band[:, min(w, cut + near):min(w, cut + far)] < 140).any(axis=1)
+    # Rows with writing beside the cut on EITHER side. Every row of a photo has
+    # "ink" somewhere (desk, shadow, frame edge), so the whole band is no baseline.
+    beside = int((left | right).sum())
+    if beside < 0.03 * band.shape[0]:
+        return False            # clean paper both sides of the fold: a real spread
+    return (left & right).sum() / beside > _CROSSING_ROWS
+
+
 def split_two_page_spreads(data: bytes, filename: str,
-                           dpi: int = 150) -> tuple[bytes, bool]:
+                           dpi: int = 150, spread_probe=None) -> tuple[bytes, bool]:
     """Split every photographed spread into its two facing pages, left then right.
 
     Returns (bytes, changed?). When no page is a spread the ORIGINAL bytes come
     back untouched, so a normal upload pays nothing. Any failure returns the input
     unchanged — a scrambled read is bad, losing the copy is worse.
+
+    `spread_probe(pngs) -> [True/False/None]` decides, when given, which wide pages
+    are open notebooks (grader.spread_probe); None for a page falls back to the
+    pixel heuristic below.
     """
     import fitz
 
@@ -329,13 +418,36 @@ def split_two_page_spreads(data: bytes, filename: str,
                    for p in doc):
             doc.close()
             return data, False
+        wide = [page.number for page in doc
+                if page.rect.width / max(page.rect.height, 1) >= _SPREAD_MIN_ASPECT]
+        images = {n: Image.open(BytesIO(doc[n].get_pixmap(dpi=dpi).tobytes("png")))
+                  for n in wide}
+        verdicts: dict[int, bool | None] = {}
+        if spread_probe is not None:
+            try:
+                answers = list(spread_probe([_png_bytes(images[n]) for n in wide]) or [])
+            except Exception:
+                answers = []
+            verdicts = {n: (answers[i] if i < len(answers) else None)
+                        for i, n in enumerate(wide)}
+        if not any(verdicts.get(n) is not False for n in wide):
+            doc.close()
+            return data, False
+        changed = False
         out = fitz.open()
         for page in doc:
-            if page.rect.width / max(page.rect.height, 1) < _SPREAD_MIN_ASPECT:
+            if page.number not in images:
                 out.insert_pdf(doc, from_page=page.number, to_page=page.number)
                 continue
-            img = Image.open(BytesIO(page.get_pixmap(dpi=dpi).tobytes("png")))
+            img = images[page.number]
             cut = _gutter_x(img)
+            verdict = verdicts.get(page.number)
+            if verdict is False or (verdict is None and _writing_crosses(img, cut)):
+                # One page photographed wide (a portrait sheet in a landscape frame,
+                # or a cropped strip): cutting it would split every line in two.
+                out.insert_pdf(doc, from_page=page.number, to_page=page.number)
+                continue
+            changed = True
             for box in ((0, 0, cut, img.height), (cut, 0, img.width, img.height)):
                 half = img.crop(box)
                 if half.width < 40 or half.height < 40:
@@ -344,6 +456,10 @@ def split_two_page_spreads(data: bytes, filename: str,
                 w, h = Image.open(BytesIO(jpeg)).size
                 pg = out.new_page(width=w, height=h)
                 pg.insert_image(fitz.Rect(0, 0, w, h), stream=jpeg)
+        if not changed:
+            out.close()
+            doc.close()
+            return data, False
         result = out.tobytes(garbage=3, deflate=True)
         out.close()
         doc.close()

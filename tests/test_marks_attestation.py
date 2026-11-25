@@ -25,9 +25,8 @@ from marks_attestation import (
     reconcile_marks_schemes,
     schemes_agree,
 )
-from pipeline import CLAUDE, GEMINI
+from pipeline import CLAUDE
 import grader
-import grader_gemini
 
 
 FAILS = []
@@ -112,8 +111,13 @@ check("hierarchical consensus is provider-order symmetric",
       canonical_marks_signature(reverse_rollup) == canonical_marks_signature(rollup))
 check("aggregate/children marks mismatch remains disagreement",
       not schemes_agree(ROLLUP_FINE, scheme(("Q1", 1, ""), ("Q16", 5, ""))))
-check("a one-child rename is not treated as a roll-up",
-      not schemes_agree(scheme(("Q16.i", 6, "")), scheme(("Q16", 6, ""))))
+# A one-child rename is the same row under another spelling (operator's rule of
+# 2026-09-17: a name is not a mark): the readers agree, the consensus keeps the
+# primary's spelling, and no roll-up is invented.
+renamed = reconcile_marks_schemes(scheme(("Q16.i", 6, "")), scheme(("Q16", 6, "")))
+check("a one-child rename agrees under the primary's spelling, never as a roll-up",
+      renamed is not None and canonical_marks_signature(renamed) == (("q16.i", 6.0),),
+      canonical_marks_signature(renamed) if renamed else None)
 check("qid prefix boundary prevents Q1 from absorbing Q10",
       not schemes_agree(
           scheme(("Q10.i", 3, ""), ("Q10.ii", 3, "")),
@@ -248,7 +252,7 @@ print("== opaque paper-bound attestation ==")
 store = MarksAttestationStore(ttl_seconds=60)
 record = store.create(
     b"paper-a", 3, BASE, SAME,
-    extractors=("claude:claude-sonnet-4-6", "gemini:gemini-2.5-flash"),
+    extractors=("claude:claude-sonnet-4-6", "claude:claude-opus-4-8"),
     context=CONTEXT,
 )
 check("exact paper, total and rows resolve",
@@ -279,16 +283,33 @@ except MarksAttestationError:
 try:
     store.create(
         b"paper-a", 3, BASE, SAME,
-        extractors=("claude:sonnet", "claude:haiku"),
+        extractors=("claude:sonnet", "Claude:Sonnet"),
         context=CONTEXT,
     )
-    check("two models from one provider are not independent", False)
+    check("one model reading twice is not independent", False)
 except MarksAttestationError:
-    check("two models from one provider are not independent", True)
+    check("one model reading twice is not independent", True)
+check("two different Claude models are independent readers", bool(store.create(
+    b"paper-a", 3, BASE, SAME, extractors=("claude:sonnet", "claude:opus"),
+    context=CONTEXT).token))
+single = store.create(b"paper-single", 3, BASE, extractors=("claude:sonnet",), context=CONTEXT)
+check("one checked reading is enough for a proof", bool(single.token)
+      and single.extractors == ("claude:sonnet",))
+try:
+    store.create(b"paper-single", 3, BASE, extractors=("claude:sonnet", "claude:opus"),
+                 context=CONTEXT)
+    check("a single reading cannot claim a second reader", False)
+except MarksAttestationError:
+    check("a single reading cannot claim a second reader", True)
+try:
+    store.create(b"paper-single", 4, BASE, extractors=("claude:sonnet",), context=CONTEXT)
+    check("a single reading must still equal the official total", False)
+except MarksAttestationError:
+    check("a single reading must still equal the official total", True)
 
 rollup_record = store.create(
     b"rollup-paper", 7, ROLLUP_FINE, ROLLUP_COARSE,
-    extractors=("claude:sonnet", "gemini:flash"), context=CONTEXT,
+    extractors=("claude:sonnet", "claude:opus"), context=CONTEXT,
 )
 check("attestation stores and proves only the common coarsened rows",
       canonical_marks_signature(rollup_record.scheme)
@@ -309,7 +330,7 @@ clock = [100.0]
 short = MarksAttestationStore(ttl_seconds=2, clock=lambda: clock[0])
 expiring = short.create(
     b"paper", 3, BASE, SAME,
-    extractors=("claude:sonnet", "gemini:flash"),
+    extractors=("claude:sonnet", "claude:opus"),
     context=CONTEXT,
 )
 clock[0] = 103.0
@@ -323,7 +344,7 @@ except MarksAttestationError:
 print("== package release provenance ==")
 package_record = store.create(
     b"paper", 3, BASE, SAME,
-    extractors=("claude:sonnet", "gemini:flash"), context=CONTEXT)
+    extractors=("claude:sonnet", "claude:opus"), context=CONTEXT)
 def package(source, proof=""):
     return build_exam_package(
         exam_type="school", student_class="Class 11", subject="Economics",
@@ -348,7 +369,7 @@ check("an arbitrary non-empty proof cannot establish authority",
 
 choice_record = store.create(
     b"choice-paper", 3, CHOICE, CHOICE_SAME,
-    extractors=("claude:sonnet", "gemini:flash"), context=CONTEXT)
+    extractors=("claude:sonnet", "claude:opus"), context=CONTEXT)
 choice_authority = marks_authority_scheme(CHOICE)
 choice_groups = server._exam_choice_groups(choice_authority)
 choice_package = build_exam_package(
@@ -394,7 +415,7 @@ detected = [BASE, BASE]
 
 
 def fake_detect(data, filename, cfg, student_class=None, subject=None,
-                total_marks=None, require_complete=False):
+                total_marks=None, require_complete=False, exam_type=""):
     calls.append((cfg.provider, cfg.model, cfg.task_id))
     index = min(len(calls) - 1, len(detected) - 1)
     return detected[index], "ai"
@@ -403,7 +424,7 @@ def fake_detect(data, filename, cfg, student_class=None, subject=None,
 async def call_endpoint():
     return await server.detect_marks(
         question_paper=UploadFile(file=io.BytesIO(b"%PDF-paper"), filename="paper.pdf"),
-        provider="gemini", model="", student_class="Class 11",
+        provider="claude", model="", student_class="Class 11",
         subject="Economics", exam_type="school", total_marks="3", mode="ai",
         authorization="Bearer test",
     )
@@ -419,7 +440,7 @@ async def call_evaluate(token, items):
             file=io.BytesIO(b"%PDF-paper"), filename="paper.pdf"),
         answer_key=UploadFile(
             file=io.BytesIO(b"%PDF-key"), filename="key.pdf"),
-        provider="gemini", model="", student_class="Class 11",
+        provider="claude", model="", student_class="Class 11",
         subject="Economics", exam_type="school", total_marks="3",
         exam_level="Class 11", paper_code="", exam_attempt="",
         applicable_law_date="", key_source="upload",
@@ -442,13 +463,11 @@ try:
     server._persist_job = lambda _job_id: None
     server.JOBS = {}
     response = asyncio.run(call_endpoint())
-    check("matching providers produce ai_verified", response["method"] == "ai_verified",
+    check("one checked Claude reading produces ai_verified", response["method"] == "ai_verified",
           response)
     check("verified response carries an opaque token", bool(response["marks_attestation"]))
-    check("two provider calls were made", len(calls) == 2, calls)
-    check("provider families are independent",
-          {call[0] for call in calls} == {CLAUDE, GEMINI}, calls)
-    check("both provider calls share one task_id",
+    check("ONE Claude reading was made", len(calls) == 1 and calls[0][0] == CLAUDE, calls)
+    check("the reading runs under the job's task_id",
           {call[2] for call in calls} == {"one-task"}, calls)
     started, background = asyncio.run(call_evaluate(
         response["marks_attestation"], response["items"]))
@@ -476,22 +495,23 @@ try:
         ("Q16.iii", 1, "three"))
     endpoint_coarse = scheme(("Q16", 3, "three parts"))
     server._MARKS_ATTESTATIONS = MarksAttestationStore()
-    detected[:] = [endpoint_fine, endpoint_coarse]
+    detected[:] = [endpoint_fine]
     calls.clear()
     rolled_up = asyncio.run(call_endpoint())
-    check("endpoint returns ai_verified for a lossless hierarchy roll-up",
+    check("a single reading with sub-part rows is verified",
           rolled_up["method"] == "ai_verified" and
           bool(rolled_up["marks_attestation"]), rolled_up)
-    check("endpoint exposes only the common coarsened row",
+    check("the endpoint keeps the reading's own sub-part rows",
           [(item["qid"], item["max"]) for item in rolled_up["items"]]
-          == [("Q16", 3.0)], rolled_up["items"])
+          == [("Q16.i", 1.0), ("Q16.ii", 1.0), ("Q16.iii", 1.0)], rolled_up["items"])
     rolled_started, rolled_background = asyncio.run(call_evaluate(
         rolled_up["marks_attestation"], rolled_up["items"]))
     rolled_payload = rolled_background.tasks[0].args[0]
-    check("evaluation receives the same coarsened proof authority",
+    check("evaluation receives the same proof authority",
           bool(rolled_started["job_id"]) and
           canonical_marks_signature(MarksScheme.model_validate(
-              rolled_payload["verified_marks_scheme"])) == (("q16", 3.0),))
+              rolled_payload["verified_marks_scheme"]))
+          == canonical_marks_signature(endpoint_fine))
 
     server._MARKS_ATTESTATIONS = MarksAttestationStore()
     server.paper_has_choice = lambda _text, _exam_type="": True
@@ -509,7 +529,7 @@ try:
           verified_choice["method"] == "ai_verified" and
           verified_choice["choice_verified"] and
           len(verified_choice["choice_groups"]) == 1 and
-          verified_choice["effective_total"] == 3 and len(calls) == 2,
+          verified_choice["effective_total"] == 3 and len(calls) == 1,
           verified_choice)
     choice_started, choice_background = asyncio.run(call_evaluate(
         verified_choice["marks_attestation"], verified_choice["items"]))
@@ -519,13 +539,6 @@ try:
           len(choice_payload["choice_groups"]) == 1,
           choice_payload.get("choice_groups"))
 
-    server._MARKS_ATTESTATIONS = MarksAttestationStore()
-    detected[:] = [CHOICE, CHOICE_FLAT]
-    calls.clear()
-    disagreement = asyncio.run(call_endpoint())
-    check("row-equal but choice-different providers cannot unlock evaluation",
-          disagreement["method"] == "ai_disagreement" and
-          not disagreement["marks_attestation"], disagreement)
 finally:
     server._require_allowed = originals["require"]
     server.pw_access.new_task_id = originals["new_task"]
@@ -558,7 +571,6 @@ check("row edits erase the attestation", 'state.marksAttestation = ""' in app_js
 print("== truncated provider output cannot be attested ==")
 valid_json = '{"total":1,"items":[{"qid":"Q1","max":1}]}'
 old_claude_call = grader._claude_call
-old_gemini_generate = grader_gemini._generate
 try:
     grader._claude_call = lambda *args, **kwargs: {
         "stop_reason": "max_tokens",
@@ -570,22 +582,8 @@ try:
         check("truncated Claude JSON is rejected", False)
     except grader.OutputLimitExceeded:
         check("truncated Claude JSON is rejected", True)
-
-    grader_gemini._generate = lambda *args, **kwargs: {
-        "candidates": [{
-            "finishReason": "MAX_TOKENS",
-            "content": {"parts": [{"text": valid_json}]},
-        }]
-    }
-    try:
-        grader_gemini.extract_marks_scheme(
-            [], google_token="token", task_id="task", require_complete=True)
-        check("truncated Gemini JSON is rejected", False)
-    except grader.OutputLimitExceeded:
-        check("truncated Gemini JSON is rejected", True)
 finally:
     grader._claude_call = old_claude_call
-    grader_gemini._generate = old_gemini_generate
 
 
 if FAILS:

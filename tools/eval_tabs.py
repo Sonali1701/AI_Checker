@@ -268,7 +268,7 @@ def main() -> None:
     ap.add_argument("--token-file", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--model", default="", help="override the grading model")
-    ap.add_argument("--provider", default="gemini", choices=("gemini", "claude"),
+    ap.add_argument("--provider", default="claude", choices=("claude",),
                     help="grading provider (claude bills only visible output — no hidden thinking)")
     ap.add_argument("--prepare", action="store_true",
                     help="download the files and read the human marks; grade nothing")

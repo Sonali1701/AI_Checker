@@ -26,9 +26,7 @@ from anchors import validate_report_anchors
 from grader import scheme_contradicts_paper
 from pdf_renderer import disc_ink_fraction, rect_ink_fraction, student_ink_mask
 from grader import _line_within_span
-from remark_quality import fragment_problem, remark_quality_problem
-
-MARGIN_REMARK_MAX_WORDS = 12
+from remark_quality import fragment_problem, remark_quality_problem, MARGIN_REMARK_MAX_WORDS
 
 # Whole-paper shape checks stay quiet below this many questions — see _check_coverage.
 _MIN_PAPER = 4
@@ -344,11 +342,14 @@ def _check_agreement(report) -> list[Issue]:
 
 
 _OBJECTIVE_QID_RE = re.compile(r"^Q?(\d+)$", re.IGNORECASE)
+# "(2) (d) 4422": a number written in brackets is the row's label too (Vidyapeeth
+# Class 8 Maths, 14 Oct 2026).
 _ANSWER_LINE_RE = re.compile(
-    r"^\s*(?:q(?:uestion)?\s*)?(\d+)\s*[).:\-]{1,3}", re.IGNORECASE)
+    r"^\s*\(?\s*(?:q(?:uestion)?\s*)?(\d+)\s*[).:\-]{1,3}", re.IGNORECASE)
 
 
-def _check_objective_anchor_ownership(report, ocr_pages, answer_map=None) -> list[Issue]:
+def _check_objective_anchor_ownership(report, ocr_pages, answer_map=None,
+                                     paper_text: str = "") -> list[Issue]:
     """An objective verdict must be anchored to the line for that exact question.
 
     This is intentionally deterministic: Q5 may never inherit a line beginning Q6,
@@ -361,8 +362,28 @@ def _check_objective_anchor_ownership(report, ocr_pages, answer_map=None) -> lis
         str(getattr(line, "text", "") or "").strip()
         for page in ocr_pages or [] for line in (getattr(page, "lines", None) or [])
     }
+
+    # The OCR wraps a short handwritten row in maths delimiters: Uday Bihar Board
+    # Accountancy 832fcb86 (10 Oct 2026) read "3 - C" as "\( 3-c \)", and Q3 to Q6
+    # held the copy for not "beginning with question 3".
+    def label_of(text: str):
+        found = _ANSWER_LINE_RE.match(re.sub(r"\\[()\[\]]", " ", text or ""))
+        return int(found.group(1)) if found else None
+
+    # A row whose label the OCR garbled ("2 - B" read "\( \Omega-B \)") between the
+    # rows of the questions before and after it is that question's own row.
+    neighbours: dict[str, tuple[int | None, int | None]] = {}
+    for page in ocr_pages or []:
+        rows = [line for line in (getattr(page, "lines", None) or [])
+                if not getattr(line, "cancelled", False)]
+        for i, line in enumerate(rows):
+            neighbours[str(getattr(line, "line_id", "") or "").strip()] = (
+                label_of(str(getattr(rows[i - 1], "text", "") or "")) if i else None,
+                label_of(str(getattr(rows[i + 1], "text", "") or "")) if i + 1 < len(rows) else None)
     out: list[Issue] = []
     owners: dict[str, str] = {}
+    from strict_grading import option_named_by_words, option_texts_from_paper
+    paper_options = option_texts_from_paper(paper_text)
     visually_verified = {
         str(qid or "").strip().lower()
         for qid in (getattr(report, "objective_visual_verified_qids", None) or [])
@@ -396,11 +417,21 @@ def _check_objective_anchor_ownership(report, ocr_pages, answer_map=None) -> lis
             continue
         anchor = str(getattr(q, "anchor_line_id", "") or "").strip()
         text = line_text.get(anchor, "")
-        actual_match = _ANSWER_LINE_RE.match(text)
+        actual = label_of(text)
+        if actual is None and neighbours.get(anchor) == (expected - 1, expected + 1):
+            actual = expected
         map_owned = anchor in mapped.get(
             str(getattr(q, "qid", "") or "").strip().lower(), set())
-        if (not anchor or (not map_owned and (
-                actual_match is None or int(actual_match.group(1)) != expected))):
+        # OCR garbles a handwritten label as often as it reads it: the live sheets
+        # gave "Qs - (25) 25 years" for Q5 and "Qs) Brodd Momtain" for Q3. When the
+        # WORDS on the line name one of THIS question's printed options, the line is
+        # this question's own answer whatever became of its label - and refusing the
+        # copy over the label cost two correctly scored copies on 2026-09-16.
+        names_own_option = False
+        if paper_options.get(expected) and text:
+            names_own_option = bool(
+                option_named_by_words(text, paper_options[expected])[0])
+        if (not anchor or (not map_owned and not names_own_option and actual != expected)):
             out.append(Issue(
                 "block", "objective-anchor-mismatch",
                 f"{q.qid} is anchored to {anchor or 'no line'} containing {text[:50]!r}; "
@@ -460,15 +491,24 @@ def _check_rendered(pdf_bytes: bytes, report=None) -> list[Issue]:
     except Exception as exc:
         return [Issue("warn", "unreadable-pdf", f"could not open the copy: {exc}")]
 
+    def _ink_args(index: int) -> dict:
+        """Erase this page's ruling as the renderer did: same tilt, same sheet width."""
+        layouts = getattr(report, "render_page_layouts", None) or {}
+        layout = layouts.get(str(index + 1), {}) if isinstance(layouts, dict) else {}
+        content = layout.get("content_bbox")
+        return {"skew": layout.get("ruling_skew"),
+                "content_w": (content[2] - content[0]) if content else None,
+                "content_top": float(content[1]) if content else 0.0}
+
     marked: list[int] = []
     for i in range(len(doc)):
         page = doc[i]
         # One raster per page, built lazily: pages with no marks never pay for it.
         ink: list = []
 
-        def _ink_for(page=page, ink=ink):
+        def _ink_for(page=page, ink=ink, i=i):
             if not ink:
-                ink.append(student_ink_mask(page))
+                ink.append(student_ink_mask(page, **_ink_args(i)))
             return ink[0]
 
         text = page.get_text().strip()
@@ -508,6 +548,22 @@ def _check_rendered(pdf_bytes: bytes, report=None) -> list[Issue]:
     # entry that ran past the foot of the page was drawn outside it and vanished —
     # two of five MCQ answers carried no visible mark, and nothing said so.
     shown = chr(10).join(doc[i].get_text() for i in range(len(doc)))
+    # The copy names a question by the label the renderer prints ("Q8(alt1)",
+    # "SB Q1(c)", "Q1(1)"), not by its id ("Q8.alt1", "SB-Q1.c", "Q1.1"). Looking for
+    # the id alone held every Bihar Board copy of 10 Oct 2026 (choice questions,
+    # sectioned English, numbered MCQ items) as "named nowhere on the copy".
+    compact_shown = re.sub(r"\s+", "", shown)
+
+    def _named(qid: str) -> bool:
+        names = {qid}
+        try:
+            from pdf_renderer import _label
+            names.add(str(_label(qid, report) or ""))
+        except Exception:  # noqa: BLE001 - the id alone is still looked for
+            pass
+        return any(name and (name in shown or re.sub(r"\s+", "", name) in compact_shown)
+                   for name in names)
+
     for q in (list(getattr(report, "questions", None) or []) if report is not None else []):
         qid = str(getattr(q, "qid", "") or "").strip()
         # An UNATTEMPTED question has nothing on the page to mark, and the renderer
@@ -516,7 +572,7 @@ def _check_rendered(pdf_bytes: bytes, report=None) -> list[Issue]:
         # copy as defects, which buried the one real finding among them.
         if not bool(getattr(q, "attempted", True)):
             continue
-        if qid and qid not in shown:
+        if qid and not _named(qid):
             out.append(Issue("block", "question-not-shown",
                              f"{qid} scored {_f(q.score):g}/{_f(q.max_score):g} but is "
                              f"named nowhere on the copy — the student cannot see it "
@@ -558,7 +614,7 @@ def _check_rendered(pdf_bytes: bytes, report=None) -> list[Issue]:
         for i, sheet in has_sheet:
             if i in inked or i > inked[-1]:
                 continue
-            mask, scale = student_ink_mask(doc[i])
+            mask, scale = student_ink_mask(doc[i], **_ink_args(i))
             # Only a page the student actually wrote on. A blank continuation page is
             # the unmarked-page check's business, not this one.
             if rect_ink_fraction(mask, scale, sheet.x0, sheet.y0,
@@ -579,7 +635,7 @@ def _check_rendered(pdf_bytes: bytes, report=None) -> list[Issue]:
     return out
 
 
-def _check_scheme(report, paper_text: str, total_marks: float | None) -> list[Issue]:
+def _check_scheme(report, paper_text: str, total_marks: float | None, exam_package=None) -> list[Issue]:
     """Does the report's denominator agree with the marks the paper itself prints?
 
     Every other check here reads the report alone, so all of them are satisfied by a
@@ -609,7 +665,20 @@ def _check_scheme(report, paper_text: str, total_marks: float | None) -> list[Is
                          "not the paper's"))
     if not paper_text:
         return out
-    conflict = scheme_contradicts_paper(report, paper_text, total_marks)
+    source_scheme = report
+    if exam_package is not None and exam_package.choice_groups:
+        # The printed paper includes alternatives omitted from the final score.
+        # Check its full graph, and separately bind every selected row to that graph.
+        from grader import MarksItem, MarksScheme
+        maxima = {q.qid: q.max_marks for q in exam_package.questions if q.scorable}
+        if exam_package.blockers() or any(q.qid not in maxima or
+                abs(q.max_score - maxima[q.qid]) > .01 for q in report.questions):
+            out.append(Issue("block", "scheme-contradicts-paper",
+                             "selected question maxima disagree with the official choice graph"))
+            return out
+        source_scheme = MarksScheme(total=sum(maxima.values()),
+            items=[MarksItem(qid=qid, max=maximum) for qid, maximum in maxima.items()])
+    conflict = scheme_contradicts_paper(source_scheme, paper_text, total_marks)
     if conflict:
         out.append(Issue("block", "scheme-contradicts-paper", conflict))
     return out
@@ -629,6 +698,251 @@ _SECTION_IN_ANSWER_RE = re.compile(
     r"(?:\b(?:section|sec\.?|u/s)\s*\d+)|(?:\bs\.\s*\d+)", re.IGNORECASE)
 
 
+_ALT_SUFFIX_RE = re.compile(r"\.?alt\.?\d+$")
+
+
+def double_credited(report) -> dict[str, str]:
+    """{qid: why} for a credited answer whose credited lines are another answer's writing.
+
+    SME review of CA copies (17 Oct 2026): an unnumbered Accounting copy had its Q2
+    machinery account, continued on page 3, paid as Q2 and again as Q6 ("Trading
+    Account correct", 7.5 marks). Q6's credited lines all sat inside Q2's answer.
+    One piece of writing answers one question, so such a question is re-marked and,
+    if it stays that way, held. A part and its own sub-parts (Q4 and Q4(a)) and the
+    OR alternatives of one question share writing by design and are never compared."""
+    from exam_package import normalize_qid
+    regions: dict[str, set[str]] = {}
+    for key, region in (getattr(report, "answer_regions", None) or {}).items():
+        if isinstance(region, dict):
+            qid = normalize_qid(str(region.get("qid") or key))
+            regions.setdefault(qid, set()).update(str(l) for l in (region.get("line_ids") or []) if l)
+
+    def base(qid: str) -> str:
+        return _ALT_SUFFIX_RE.sub("", qid)
+
+    credited: dict[str, set[str]] = {}
+    shown: dict[str, str] = {}
+    for q in list(getattr(report, "questions", None) or []):
+        if (not bool(getattr(q, "attempted", True)) or bool(getattr(q, "objective", False))
+                or _f(getattr(q, "score", 0)) <= 0 or _f(getattr(q, "max_score", 0)) <= 2):
+            continue
+        qid = normalize_qid(str(getattr(q, "qid", "") or ""))
+        lines = {str(getattr(c, "step_line_id", "") or "")
+                 for c in (getattr(q, "criteria", None) or []) if _f(getattr(c, "awarded", 0)) > 0} - {""}
+        if not getattr(q, "criteria", None) and getattr(q, "anchor_line_id", ""):
+            lines.add(str(q.anchor_line_id))
+        if lines:
+            credited[qid] = lines
+            shown[qid] = str(q.qid)
+    out: dict[str, str] = {}
+    for b, lines in credited.items():
+        for a in credited:
+            if a == b or base(a) == base(b) or a.startswith(base(b)) or b.startswith(base(a)):
+                continue
+            shared = lines & regions.get(a, set())
+            if len(shared) >= 2 and len(shared) >= 0.6 * len(lines):
+                out[b] = (f"{shown[b]} is marked on writing that belongs to {shown[a]} "
+                          f"({len(shared)} of its {len(lines)} credited lines are in {shown[a]}'s answer). "
+                          f"One piece of writing answers one question: mark {shown[b]} only on writing "
+                          f"that answers {shown[b]}, or as not attempted.")
+                break
+    return out
+
+
+def _check_double_credit(report) -> list[Issue]:
+    return [Issue("block", "double-credit", why) for why in double_credited(report).values()]
+
+
+def phantom_attempts(report) -> dict[str, str]:
+    """{qid: why} for a zero-mark "attempt" marked only on another answer's writing.
+
+    CA faculty review (17-18 Oct 2026). Business Laws 23a44745: Q3(a) and Q3(b), never
+    written, were crossed at 0 on the student's "4 b)" answer, and "answer Q3 or Q4"
+    then counted Q3 and dropped Q4. Corporate Laws 1e3c181a: an unwritten Q4(a) was
+    zeroed on the first lines of "Answer 1(a)", took one of the two "any two" places,
+    and the Q3(a) and Q3(b) written on pages 6 and 7 went out "not counted". Business
+    Laws f87b56cc: Q3(a) and Q3(b) crossed on the Q2 answers. A question that earned
+    nothing, has no answer region of its own, and whose every cited line lies in
+    another question's answer is not attempted. The marks do not change (0 either
+    way); the crosses leave the other answer and the choice rule counts real answers.
+    A part and its own sub-parts and the OR alternatives of one question share writing
+    by design and are never compared. MCQ-sized rows are left to their own checks."""
+    from exam_package import normalize_qid
+    regions: dict[str, set[str]] = {}
+    shown: dict[str, str] = {}
+    for key, region in (getattr(report, "answer_regions", None) or {}).items():
+        if isinstance(region, dict):
+            qid = normalize_qid(str(region.get("qid") or key))
+            shown[qid] = str(region.get("qid") or key)
+            regions.setdefault(qid, set()).update(
+                str(l) for l in list(region.get("line_ids") or []) + list(region.get("label_line_ids") or []) if l)
+
+    def base(qid: str) -> str:
+        return _ALT_SUFFIX_RE.sub("", qid)
+
+    def related(a: str, b: str) -> bool:
+        return base(a) == base(b) or a.startswith(base(b)) or b.startswith(base(a))
+
+    out: dict[str, str] = {}
+    for q in list(getattr(report, "questions", None) or []):
+        criteria = list(getattr(q, "criteria", None) or [])
+        if (not bool(getattr(q, "attempted", True)) or bool(getattr(q, "objective", False))
+                or _f(getattr(q, "score", 0)) > 0 or _f(getattr(q, "max_score", 0)) <= 2
+                or any(_f(getattr(c, "awarded", 0)) > 0 for c in criteria)):
+            continue
+        qid = normalize_qid(str(getattr(q, "qid", "") or ""))
+        cited = {str(getattr(c, "step_line_id", "") or "") for c in criteria}
+        cited.add(str(getattr(q, "anchor_line_id", "") or ""))
+        cited.discard("")
+        if not cited:
+            continue
+        owners = {line: {a for a, lines in regions.items() if a != qid and not related(a, qid) and line in lines}
+                  for line in cited | regions.get(qid, set())}
+        if any(not owners[line] for line in cited):
+            continue
+        if any(not owners[line] for line in regions.get(qid, set())):
+            continue  # some writing is its own: a wrong answer, not a phantom
+        names = sorted({shown[a] for line in cited for a in owners[line]})
+        out[qid] = (f"{q.qid} earned nothing and every line it was marked on belongs to "
+                    f"{', '.join(names[:3])}; it is not attempted.")
+    return out
+
+
+_DENIES_ANSWER_RE = re.compile(
+    # "Part (ii) not attempted" beside marks for (i) is a fair remark, so only a claim
+    # that NOTHING valid was written counts.
+    r"\bno (?:valid|relevant|correct) (?:point|characteristic|feature|provision|answer|explanation)s?\b"
+    r"|\bnothing (?:valid|relevant|correct)\b", re.IGNORECASE)
+
+
+def _check_remark_denies_credit(report) -> list[Issue]:
+    """A remark that says nothing valid was written, beside marks that were awarded.
+
+    CA faculty review (18 Oct 2026), Business Laws 23a44745: Q2(a) was given 5.5 of 7
+    for four characteristics ticked on the page, and its margin note read "No valid
+    characteristic is stated". The faculty: "AI remarks is not proper as student has
+    mentioned valid characteristics". Wording, not marks: the teacher is told."""
+    from exam_package import normalize_qid
+    out: list[Issue] = []
+    boxes = getattr(report, "verified_step_boxes", None) or {}
+    for q in list(getattr(report, "questions", None) or []):
+        if not bool(getattr(q, "attempted", True)) or _f(getattr(q, "score", 0)) <= 0:
+            continue
+        key = normalize_qid(str(q.qid)) + ":"
+        texts = [str(getattr(q, "remark", "") or "")] + [
+            str((box or {}).get("deduction_reason") or "") for k, box in boxes.items()
+            if str(k).startswith(key) and isinstance(box, dict)]
+        said = next((t for t in texts if _DENIES_ANSWER_RE.search(t)), "")
+        if said:
+            out.append(Issue("warn", "remark-denies-credit",
+                             f"{q.qid} earned {_f(q.score):g} but a remark says nothing valid was "
+                             f"written: {said.strip()!r}. Say what was right and what is missing."))
+    return out
+
+
+def credit_without_own_answer(report) -> dict[str, str]:
+    """{qid: why} for marks on a part the answer map never found, cited only from other
+    answers (the rule is _check_credit_without_own_answer's)."""
+    from exam_package import normalize_qid
+    return {normalize_qid(i.detail.split(":", 1)[0]): i.detail
+            for i in _check_credit_without_own_answer(report)}
+
+
+def _check_credit_without_own_answer(report) -> list[Issue]:
+    """Marks for a part the answer map never found, cited only from other answers.
+
+    CA Inter CMA MTS-02 (2026-09-19): the booklet has four pages and no Part B
+    Q1(B) or Q3(A) at all, yet the grader gave them 4/5 and 6/8, quoting the KEY's
+    variance lines and pointing at the student's Q2(A) budget table. The copy went
+    out at 42.5 where a faculty re-check gave 31. A part with no answer region of
+    its own whose every cited line belongs to ANOTHER question's answer has no
+    evidence on the sheet, so its marks cannot stand.
+    """
+    from exam_package import normalize_qid
+    regions = getattr(report, "answer_regions", None) or {}
+    owners: dict[str, set[str]] = {}
+    own_lines: dict[str, set[str]] = {}
+    for key, region in regions.items():
+        if not isinstance(region, dict):
+            continue
+        qid = normalize_qid(str(region.get("qid") or key))
+        lines = {str(l) for l in (region.get("line_ids") or []) if l}
+        own_lines.setdefault(qid, set()).update(lines)
+        for line in lines:
+            owners.setdefault(line, set()).add(qid)
+    out: list[Issue] = []
+    for q in list(getattr(report, "questions", None) or []):
+        if (not bool(getattr(q, "attempted", True)) or float(getattr(q, "score", 0) or 0) <= 0
+                or bool(getattr(q, "objective", False))
+                # MCQ-sized rows share answer lists the map often splits between
+                # neighbours (Taxation MTS-05 GST objective Q2/Q3 and FM-SM's SM MCQ
+                # were held that way). The phantoms that mattered were 4-8 marks.
+                or float(getattr(q, "max_score", 0) or 0) <= 2):
+            continue
+        qid = normalize_qid(str(getattr(q, "qid", "") or ""))
+        if own_lines.get(qid):
+            continue
+        cited = {str(getattr(c, "step_line_id", "") or "")
+                 for c in (getattr(q, "criteria", None) or [])} - {""}
+        anchor = str(getattr(q, "anchor_line_id", "") or "")
+        if anchor:
+            cited.add(anchor)
+        # A line owned by ONE other answer is that answer's work. A line several
+        # questions share (an MCQ answer list, "A(2) B(1) C(3) ...") proves nothing:
+        # FM-SM MTS-05's SM MCQ Q2 was held over exactly that block.
+        foreign = {line for line in cited
+                   if qid not in owners.get(line, set()) and len(owners.get(line, set())) == 1}
+        if cited and cited <= foreign:
+            others = sorted({o for line in cited for o in owners.get(line, set())} - {qid})
+            out.append(Issue(
+                "block", "credit-without-own-answer",
+                f"{q.qid}: {float(q.score):g} mark(s) given but no answer of its own was "
+                f"found; every cited line belongs to {', '.join(others)}"))
+    return out
+
+
+def _check_review_reasons(report) -> list[Issue]:
+    """Reasons the pipeline itself gave for sending this copy to faculty.
+
+    The strict route used to REFUSE a copy at these points (an unresolved
+    regrade, a forced denominator, an incomplete primary report). Since 2026-09-19
+    every copy goes either to the student or to a faculty reviewer, so the reason
+    is carried on the report and turned into a score-integrity hold here: the
+    marked PDF travels to faculty with it.
+    """
+    return [Issue("block", "faculty-review", str(reason))
+            for reason in list(getattr(report, "review_reasons", None) or []) if str(reason).strip()]
+
+
+def _check_inventory_credit(report) -> list[Issue]:
+    """Marks on a question the visual inventory found no answer for, with no
+    evidence of its own on the sheet.
+
+    The grader was told in plain words that these were not written. When it still
+    awards them without citing a line the map or its own anchor gave that
+    question, the marks have nothing under them: exactly the phantom Q3 that took
+    an "any four" slot from a real Q6 on the CA batch.
+    """
+    from exam_package import normalize_qid
+    absent = {normalize_qid(str(q)) for q in (getattr(report, "inventory_absent_qids", None) or [])}
+    if not absent:
+        return []
+    regions = getattr(report, "answer_regions", None) or {}
+    out: list[Issue] = []
+    for q in list(getattr(report, "questions", None) or []):
+        qid = normalize_qid(str(getattr(q, "qid", "") or ""))
+        if qid not in absent or _f(q.score) <= 0 or not bool(getattr(q, "attempted", True)):
+            continue
+        region = regions.get(qid) if isinstance(regions, dict) else None
+        own = {str(l) for l in ((region or {}).get("line_ids") or []) if l}
+        if own:
+            continue
+        out.append(Issue("block", "inventory-absent-credited",
+                         f"{q.qid}: {_f(q.score):g} mark(s) given, but the page inventory found "
+                         f"no answer to it and the grader cited no lines of its own"))
+    return out
+
+
 def _check_citation_credit(report, ocr_pages) -> list[Issue]:
     lines = {l.line_id: (l.text or "")
              for p in (ocr_pages or []) for l in getattr(p, "lines", [])}
@@ -638,7 +952,9 @@ def _check_citation_credit(report, ocr_pages) -> list[Issue]:
     for q in list(getattr(report, "questions", None) or []):
         for c in (getattr(q, "criteria", None) or []):
             desc = str(getattr(c, "description", "") or "")
-            if not _CRITERION_CITES_RE.search(desc):
+            # "<section> for product listing" is an HTML tag on a coding paper, not a
+            # provision (PW Skills live run, 12 Nov 2026).
+            if not _CRITERION_CITES_RE.search(re.sub(r"</?[A-Za-z][\w-]*\s*/?>", " ", desc)):
                 continue
             if _f(c.awarded) < _f(c.max) - 1e-9 or _f(c.max) <= 0:
                 continue                      # only a step paid IN FULL is suspect
@@ -717,6 +1033,174 @@ def _check_anchors(report, ocr_pages) -> list[Issue]:
     return out
 
 
+_CONTRADICTION_RE = re.compile(
+    r"(?:should be|must be|is|equals?)\s+(.{1,30}?)\s*,?\s+(?:not|instead of|rather than)[\s,]+(.{1,30}?)\s*[.,]?$",
+    re.IGNORECASE)
+
+
+_BARE_LABEL_RE = re.compile(
+    r"^\W*(?:q(?:ues(?:tion)?)?\.?\s*)?(?:\d{1,2}|[ivx]{1,4}|[a-e])\s*[).:\]-]?"
+    r"\s*(?:[-:]?\s*(?:option|ans|answer|sol))?\W*$", re.IGNORECASE)
+
+
+def _check_bare_objective(report, ocr_pages) -> list[Issue]:
+    """An MCQ credited on a line that carries only its label ("1)", "Q2 - option").
+
+    MEASURED 2026-09-30: Riddhi's Radiant Physics Q1 and Q2 read "Q1 - option" with
+    no option, and a blank English Q1 was only "1)"; both scored 1/1. Over 55 stored
+    reports this fires on 2 copies.
+    """
+    lines = {line.line_id: line.text for page in (ocr_pages or [])
+             for line in (getattr(page, "lines", None) or [])}
+    # A close read of the row's own strip of the page showed the option
+    # (objective_confirm.py): the label-only OCR line is not the whole row.
+    crop_confirmed = {str(x) for x in (getattr(report, "objective_crop_confirmed_qids", None) or [])}
+    bare = []
+    for q in list(getattr(report, "questions", None) or []):
+        if not bool(getattr(q, "objective", False)) or _f(q.score) <= 0:
+            continue
+        if str(q.qid) in crop_confirmed:
+            continue
+        text = lines.get(str(getattr(q, "anchor_line_id", "") or ""))
+        if text is not None and re.fullmatch(r"[ABCD]", text.strip(), flags=re.I):
+            from evidence_repair import _independently_located_objective
+            if _independently_located_objective(report, q):
+                continue  # a verified written option cell is not a question label
+        # "(A)" alone on the answer row IS the option when it is the one credited.
+        # Uday Bihar Board Economics (10 Oct 2026): the students wrote "1. (A)" with the
+        # number in the margin, the OCR kept "(A)", and ten correct MCQs held the copy.
+        # Only a reading the key-blind readers confirmed: an unconfirmed one is
+        # exactly the case this check exists for.
+        written = re.fullmatch(r"\W*\(?\s*([A-D])\s*\)?\W*",
+                               (text or "").replace("\\(", "").replace("\\)", ""), flags=re.I)
+        unconfirmed = {str(x) for x in (getattr(report, "objective_unconfirmed_qids", None) or [])}
+        if (written and q.qid not in unconfirmed
+                and written.group(1).upper() == str(getattr(q, "chosen_option", "") or "").upper()):
+            continue
+        if text is not None and _BARE_LABEL_RE.match(text.replace("\\(", "").replace("\\)", "")):
+            bare.append(f"{q.qid} (\"{text.strip()}\")")
+    if not bare:
+        return []
+    return [Issue("block", "objective-bare-label",
+                  "Credited, but the answer line shows no option: " + ", ".join(bare[:6]))]
+
+
+def _check_unread_pages(report, ocr_pages) -> list[Issue]:
+    """A question zeroed as "not attempted" while a page of the booklet is unread.
+
+    MEASURED 2026-09-30 (Radiant Class 9 Maths): pages the OCR returned with 0 to 2
+    lines (an upside-down notebook, faint photos) held complete answers, and those
+    questions were marked "Not attempted" and released. The answer map had not
+    located them either. Over 95 stored copies this holds 14, all of them copies
+    with such a page.
+
+    MEASURED 2026-10-01 (CBSE Class 9 Test-03 scans): the blank pages after a
+    student's last answer read 0 lines too, and held every copy. A page the pipeline
+    measured as blank (no handwriting on a white scan) is not unread.
+    """
+    sparse = [p.page for p in (ocr_pages or []) if len(getattr(p, "lines", None) or []) <= 2
+              and not getattr(p, "blank", False)]
+    if not sparse:
+        return []
+    unresolved = set(getattr(report, "unresolved_answer_qids", None) or [])
+    blank = [q.qid for q in (getattr(report, "questions", None) or [])
+             if not bool(getattr(q, "objective", False)) and _f(q.score) <= 0
+             and getattr(q, "attempted", True) is False and q.qid in unresolved]
+    if not blank:
+        return []
+    return [Issue("block", "answer-maybe-unread",
+                  f"Marked not attempted: {', '.join(blank[:8])}; page(s) "
+                  f"{', '.join(str(n) for n in sparse[:6])} could not be read. Check "
+                  "those pages for the answers.")]
+
+
+_MAP_QUESTION_RE = re.compile(
+    r"(?im)^[ \t]*Q?\.?\s*(\d{1,2})\s*[.)][^\n]*?"
+    r"\b(?:outline|political|physical|world|india(?:n)?)(?:\s+\w+){0,2}\s+map\b"
+    r"|^[ \t]*Q?\.?\s*(\d{1,2})\s*[.)][^\n]*?\bon\s+(?:the|a|an)\s+(?:given\s+)?"
+    r"(?:\w+\s+){0,3}map\b")
+# "SECTION - E / Map-Based Question / On the given outline political map of India,
+# locate ..." prints no number at all (Parishram History, Infinity Test 10).
+_UNNUMBERED_MAP_RE = re.compile(
+    r"(?im)^[ \t]*(?:map[\s-]*based\s+questions?\b|on\s+(?:the|a|an)\s+(?:given\s+)?"
+    r"(?:\w+\s+){0,3}map\b)")
+_QUESTION_LABEL_RE = re.compile(r"(?im)^[ \t]*Q(?:uestion)?\.?\s*(\d{1,2})\s*[.):]")
+
+
+def map_question_numbers(paper_text: str) -> set[int]:
+    """Question numbers that ask the student to locate places on a map.
+
+    MEASURED on Parishram Class 12 Infinity Test 10 (8 Oct 2026): neither map question
+    was found, so neither copy was held. Geography's "Q15. On the given outline world
+    map" has a word between "outline" and "map"; History's map question carries no
+    number, and a copy went out with 5/5 for four places the faculty crossed (1/5).
+    An unnumbered map question is the first numbered question after its heading, or
+    the one after the last numbered question before it."""
+    text = paper_text or ""
+    # An instruction line ("6. Question 15 is map based ... on Indian map") names the
+    # map question; its own number is the instruction's, not a question's.
+    found = {int(m.group(1) or m.group(2)) for m in _MAP_QUESTION_RE.finditer(text)
+             if not re.search(r"(?i)\bquestions?\s+(?:no\.?\s*)?\d", m.group(0))}
+    labels = [(m.start(), int(m.group(1))) for m in _QUESTION_LABEL_RE.finditer(text)]
+    for m in _UNNUMBERED_MAP_RE.finditer(text):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if _QUESTION_LABEL_RE.match(text, line_start):
+            continue                      # a numbered line, read above
+        after = [n for pos, n in labels if m.end() <= pos <= m.end() + 120]
+        before = [n for pos, n in labels if pos < m.start()]
+        if after:
+            found.add(after[0])
+        elif before:
+            found.add(max(before) + 1)
+    return found
+
+
+def _check_map_answers(report, paper_text: str) -> list[Issue]:
+    """An attempted map question goes to a teacher.
+
+    MEASURED 2026-10-01 (CBSE Class 9 SST Test-03, Q20 "On an outline map of the
+    Indian subcontinent, locate and label ... Harappan sites"): the grader credited
+    sites from a "[detected diagram]" without knowing where they were drawn. sst3
+    was RELEASED with Kalibangan on the Kutch coast and Dholavira near Khambhat (2 of
+    3 wrong), sst5 got 3/3 with every label in the wrong state and no dots. Where a
+    place sits on a hand-drawn map is not something the OCR or the grader can verify.
+    """
+    numbers = map_question_numbers(paper_text)
+    if not numbers:
+        return []
+    attempted = [q.qid for q in (getattr(report, "questions", None) or [])
+                 if getattr(q, "attempted", True) is not False
+                 and not bool(getattr(q, "objective", False))
+                 and (m := re.match(r"Q?(\d+)", str(q.qid))) and int(m.group(1)) in numbers]
+    if not attempted:
+        return []
+    return [Issue("block", "map-needs-teacher",
+                  f"Map answer {', '.join(attempted[:6])}: check that each place is marked "
+                  "and labelled in the right location before releasing.")]
+
+
+def _check_self_contradiction(report) -> list[Issue]:
+    """A remark whose correction equals what it corrects ("should be 1, not 1").
+
+    MEASURED 2026-09-29 (Core Maths Q13): such a remark tells the student nothing is
+    wrong while taking a mark away, so the copy goes to a faculty reviewer.
+    """
+    out: list[Issue] = []
+    for q in list(getattr(report, "questions", None) or []):
+        remark = " ".join(str(getattr(q, "remark", "") or "").split())
+        for sentence in re.split(r"(?<=[.!?])\s+", remark):
+            m = _CONTRADICTION_RE.search(sentence)
+            if not m:
+                continue
+            said, corrected = (re.sub(r"[^0-9a-z]", "", x.lower()) for x in m.groups())
+            if said and said == corrected:
+                out.append(Issue(
+                    "block", "remark-contradicts-itself",
+                    f"{q.qid}: the remark \"{sentence}\" corrects a value to itself."))
+                break
+    return out
+
+
 def _check_coverage(report) -> list[Issue]:
     """Answers the marker never read, and marks placed by guesswork.
 
@@ -724,6 +1208,41 @@ def _check_coverage(report) -> list[Issue]:
     and left its verdict on the report; this turns that into a release decision.
     """
     out: list[Issue] = []
+
+    unconfirmed = list(getattr(report, "objective_unconfirmed_qids", None) or [])
+    # An MCQ marked WRONG on a reading nobody could confirm is a mark the student may
+    # have lost to a misreading, so it goes to a faculty reviewer. MEASURED 2026-09-29:
+    # a Core Maths copy lost Q1, Q4 and Q8 (all correct) because the photo cut off
+    # the question numbers and the answers were paired with the wrong questions, and
+    # an Applied Maths copy lost Q5 because "(3)" was read as "(B)". Every wrong mark
+    # was on the unconfirmed list. A CREDITED unconfirmed MCQ holds the copy too
+    # (2026-09-30): on the Radiant Physics batch "Q1 - option", with no option
+    # written, was filled in with the key's own letter and scored 1/1, and a blank
+    # English MCQ was ticked. Across 45 stored reports this holds 13 copies.
+    by_qid = {q.qid: q for q in (getattr(report, "questions", None) or [])}
+    lost = [qid for qid in unconfirmed
+            if qid in by_qid and _f(by_qid[qid].score) <= 0
+            and getattr(by_qid[qid], "attempted", True) is not False]
+    if lost:
+        out.append(Issue(
+            "block", "objective-unconfirmed-wrong",
+            "Marked wrong on an option reading that could not be confirmed: "
+            + ", ".join(lost[:8]) + ". Check the student's written option against the key."))
+    # Only an MCQ that carries marks is "credited". Uday Bihar Board English
+    # (2026-10-10, "answer any 15 of 20"): Q16 to Q20, which the student never
+    # answered and which are not on the report at all, held the copy as "credited
+    # on an option reading that could not be confirmed".
+    from exam_package import normalize_qid
+    by_norm = {normalize_qid(qid): q for qid, q in by_qid.items()}
+    unconfirmed = [qid for qid in unconfirmed if qid not in set(lost)
+                   and _f(getattr(by_qid.get(qid) or by_norm.get(normalize_qid(qid)),
+                                  "score", 0)) > 0]
+    if unconfirmed:
+        out.append(Issue(
+            "block", "objective-unconfirmed",
+            "Credited on an option reading that could not be confirmed: "
+            + ", ".join(unconfirmed[:8])
+            + ". Check that the student wrote this option."))
 
     missed = list(getattr(report, "false_blank_qids", None) or [])
     if missed:
@@ -779,20 +1298,66 @@ def _check_coverage(report) -> list[Issue]:
     return out
 
 
+def _check_mcq_scored_by_judgement(report, paper_text: str) -> list[Issue]:
+    """An MCQ the paper prints with options (A) to (D) whose key letter was never
+    verified is marked by judgement, not against the key.
+
+    MEASURED 2026-10-14 (Vidyapeeth Class 8 Maths): 9 of 16 MCQs had no verified key
+    letter, and copies went to students with a wrong option given full marks ("132
+    (B)" for (C) 133) and half a mark for a wrong value. Warns everywhere; a category
+    that sends copies straight to students holds on it (extra_hold_codes)."""
+    if not paper_text:
+        return []
+    from strict_grading import option_texts_from_paper
+    options = option_texts_from_paper(paper_text)
+    out: list[Issue] = []
+    for q in list(getattr(report, "questions", None) or []):
+        match = re.fullmatch(r"Q(\d{1,3})", str(getattr(q, "qid", "") or "").strip(), re.IGNORECASE)
+        printed = options.get(int(match.group(1))) if match else None
+        if (not printed or set(printed) != {"A", "B", "C", "D"}
+                or any(len(str(text)) > 160 for text in printed.values())
+                or float(getattr(q, "max_score", 0) or 0) > 2
+                or bool(getattr(q, "objective", False))):
+            continue
+        out.append(Issue(
+            "block", "mcq-without-key-letter",
+            f"{q.qid} is printed as an MCQ with options (A) to (D), but no key letter was "
+            f"verified for it, so its {float(getattr(q, 'score', 0) or 0):g} is a judgement, "
+            "not a comparison with the key"))
+    return out
+
+
 def check_copy(report, *, pdf_bytes: bytes | None = None,
                total_marks: float | None = None,
-               paper_text: str = "", ocr_pages=None, answer_map=None) -> list[Issue]:
+               paper_text: str = "", ocr_pages=None, answer_map=None,
+               exam_package=None) -> list[Issue]:
     """Every mechanical fault we know how to find, most severe first. Costs nothing."""
     issues = (_check_marks(report, total_marks) + _check_remarks(report)
               + _check_agreement(report)
               + _check_coverage(report)
+              + _check_self_contradiction(report)
+              + _check_bare_objective(report, ocr_pages)
+              + _check_unread_pages(report, ocr_pages)
+              + _check_map_answers(report, paper_text)
               + _check_anchors(report, ocr_pages)
-              + _check_scheme(report, paper_text, total_marks)
+              + _check_scheme(report, paper_text, total_marks, exam_package)
               + _check_citation_credit(report, ocr_pages)
+              + _check_credit_without_own_answer(report)
+              + _check_double_credit(report)
+              + _check_remark_denies_credit(report)
+              + _check_inventory_credit(report)
+              + _check_review_reasons(report)
               + _check_objective_anchor_ownership(
-                  report, ocr_pages, answer_map=answer_map))
+                  report, ocr_pages, answer_map=answer_map, paper_text=paper_text)
+              + _check_mcq_scored_by_judgement(report, paper_text))
+    issues += [Issue("block", "commerce-point-order-unverified", str(detail))
+               for detail in (getattr(report, "commerce_point_order_issues", None) or [])
+               if str(detail).strip()]
     if pdf_bytes:
         issues += _check_rendered(pdf_bytes, report)
+        from grading_quality import check_render_manifest
+        if getattr(report, "evidence_contract", False):
+            issues += check_render_manifest(report, pdf_bytes)
     order = {"block": 0, "warn": 1, "note": 2}
     return sorted(issues, key=lambda i: (order.get(i.severity, 9), i.code))
 
@@ -802,9 +1367,80 @@ def blocking(issues: list[Issue]) -> list[Issue]:
     return [i for i in (issues or []) if getattr(i, "severity", "") == "block"]
 
 
+# --- what actually holds a copy back ------------------------------------------
+#
+# MEASURED 2026-09-16 on a six-booklet batch: EVERY copy was refused, and not one
+# of them was refused over a wrong mark. The reasons were a mark whose circle
+# overlapped 4% of a letter, a remark the fragment-linter misread ("Wrote Piedmont.
+# Key answer is Intermontane." is a perfectly good remark), a continuation page
+# with no marks on it, and the second examiner quoting the wrong OCR line id. A
+# copy nobody receives teaches nobody anything, so those now travel WITH the copy
+# as warnings for the teacher instead of destroying it.
+#
+# A copy is still held only when the SCORE itself is wrong or unprovable, or there
+# is nothing releasable to send. Presentation, feedback wording and evidence
+# bookkeeping are warnings.
+SCORE_INTEGRITY_CODES = frozenset({
+    "denominator",                     # graded out of the wrong total
+    "total-mismatch",                  # question scores do not sum to the copy total
+    "over-award",                      # a score above the question maximum
+    "criteria-mismatch",               # steps do not sum to the question's score
+    "steps-do-not-cover-question",     # steps do not cover the question's marks
+    "step-over-award",                 # a step above its own maximum
+    "unresolved-rubric-point",         # an official rubric point nobody marked
+    "met-mismatch",                    # the tick contradicts the arithmetic
+    "duplicate-qid",                   # one question graded twice
+    "maxima-rescaled",                 # per-question maxima were smeared to fit
+    "scheme-contradicts-paper",        # the marks scheme is not this paper's
+    "objective-anchor-mismatch",       # an MCQ scored from another question's line
+    "duplicate-objective-anchor",      # two MCQs scored from one line
+    "answer-not-read",                 # an answer was never read, so its 0 is not a mark
+    "citation-credited-not-given",     # credit for a citation the student did not write
+    "unattempted-answer-has-credit",   # marks recorded on an answer called blank
+    "credit-without-own-answer",       # marks for a part whose only evidence is another answer
+    "double-credit",                   # one piece of writing paid under two questions
+    "inventory-absent-credited",       # marks for an answer the page inventory says is not there
+    "faculty-review",                  # the pipeline itself asked for a faculty reviewer
+    "objective-unconfirmed-wrong",     # an MCQ marked wrong on an unconfirmed reading
+    "objective-unconfirmed",           # an MCQ credited on an unconfirmed reading
+    "objective-bare-label",            # an MCQ credited on a line with no option written
+    "answer-maybe-unread",             # zeroed as not attempted while a page is unread
+    "map-needs-teacher",               # map places credited without knowing where they sit
+    "remark-contradicts-itself",       # a mark taken away by a remark that corrects nothing
+    # NOT here: "preflight-error". A crash inside the checker says nothing about
+    # the marks, and a bug in the gate must never again refuse a whole batch.
+})
+# Since 2026-09-19 a "held" copy is not thrown away: it is routed to FACULTY REVIEW
+# with its marked PDF, and only a copy with nothing marked at all fails outright.
+
+
+def hold_codes(category: str = "") -> frozenset[str]:
+    """The issue codes that hold a copy: the shared set above, plus what the exam
+    category adds, minus what it lets through as a warning (categories/<id>.py)."""
+    if not category:
+        return SCORE_INTEGRITY_CODES
+    import categories
+    review = categories.get(category).review
+    return (SCORE_INTEGRITY_CODES | review.extra_hold_codes) - review.warn_only_codes
+
+
+def release_blocking(issues: list[Issue], category: str = "") -> list[Issue]:
+    """The issues that must stop a copy, under the release policy above."""
+    codes = hold_codes(category)
+    return [i for i in blocking(issues) if str(getattr(i, "code", "")) in codes]
+
+
+def advisory(issues: list[Issue], category: str = "") -> list[Issue]:
+    """Everything the teacher should see but which does not hold the copy."""
+    holding = {id(i) for i in release_blocking(issues, category)}
+    return [i for i in (issues or []) if id(i) not in holding]
+
+
 def summarise(issues: list[Issue]) -> str:
     if not issues:
         return "pre-flight clean"
-    n_block = len(blocking(issues))
-    return (f"pre-flight found {len(issues)} issue(s), {n_block} blocking:\n  "
+    # Count what actually holds the copy. Reporting the raw severities here said
+    # "0 blocking" one line before "UNGRADABLE - 1 blocking issue(s)".
+    n_block = len(release_blocking(issues))
+    return (f"pre-flight found {len(issues)} issue(s), {n_block} holding the copy:\n  "
             + "\n  ".join(str(i) for i in issues))

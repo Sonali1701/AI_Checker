@@ -19,14 +19,29 @@ class WorkflowState(str, Enum):
     ADJUDICATING = "adjudicating"
     AGGREGATING = "aggregating"
     RENDERING = "rendering"
+    # One close read of each MCQ row the release gate could not confirm
+    # (objective_confirm.py), between the first render and the gate.
+    CONFIRMING_MCQ = "confirming_mcq"
     RELEASE_CHECK = "release_check"
+    # The release gate can re-render a copy once, in margin-only mode, when marks
+    # collide with the student's writing. MEASURED 2026-09-16: the pipeline reported
+    # this stage, the enum did not have it, and ValueError("'repairing_layout' is not
+    # a valid WorkflowState") was caught by the gate and reported as a BLOCKING
+    # release issue - so the step that exists to repair a copy destroyed it instead.
+    REPAIRING_LAYOUT = "repairing_layout"
     RELEASED = "released"
+    # A marked copy the release gate would not send to the student goes to a
+    # faculty reviewer WITH its PDF (operator's rule, 2026-09-19: a copy is never
+    # thrown away; it goes to the student or to faculty). UNGRADABLE remains for a
+    # copy that could not be marked at all (wrong paper, not an answer sheet).
+    FACULTY_REVIEW = "faculty_review"
     UNGRADABLE = "ungradable"
     FAILED = "failed"
 
 
 TERMINAL_STATES = {
     WorkflowState.RELEASED,
+    WorkflowState.FACULTY_REVIEW,
     WorkflowState.UNGRADABLE,
     WorkflowState.FAILED,
 }
@@ -65,12 +80,28 @@ _ALLOWED: dict[WorkflowState, set[WorkflowState]] = {
         WorkflowState.RENDERING, WorkflowState.UNGRADABLE, WorkflowState.FAILED,
     },
     WorkflowState.RENDERING: {
+        WorkflowState.CONFIRMING_MCQ, WorkflowState.RELEASE_CHECK,
+        WorkflowState.UNGRADABLE, WorkflowState.FAILED,
+    },
+    WorkflowState.CONFIRMING_MCQ: {
         WorkflowState.RELEASE_CHECK, WorkflowState.UNGRADABLE, WorkflowState.FAILED,
     },
     WorkflowState.RELEASE_CHECK: {
-        WorkflowState.RELEASED, WorkflowState.UNGRADABLE, WorkflowState.FAILED,
+        WorkflowState.REPAIRING_LAYOUT,
+        WorkflowState.RELEASED, WorkflowState.FACULTY_REVIEW,
+        WorkflowState.UNGRADABLE, WorkflowState.FAILED,
+    },
+    WorkflowState.REPAIRING_LAYOUT: {
+        WorkflowState.RELEASE_CHECK, WorkflowState.RELEASED, WorkflowState.FACULTY_REVIEW,
+        WorkflowState.UNGRADABLE, WorkflowState.FAILED,
     },
 }
+# A copy can be sent to faculty from any working state: the gate is the usual
+# place, but an earlier stage may also decide the copy needs a reviewer.
+for _state, _targets in _ALLOWED.items():
+    if _state not in (WorkflowState.RECEIVED, WorkflowState.PACKAGE_VALIDATING):
+        _targets.add(WorkflowState.FACULTY_REVIEW)
+del _state, _targets
 
 
 def _now() -> str:
@@ -129,6 +160,12 @@ class AutomaticWorkflow:
         self.failure_message = (message or "Automatic grading failed.").strip()
         self.transition(WorkflowState.FAILED, self.failure_message)
 
+    def faculty_review(self, code: str, message: str) -> None:
+        """The copy is marked but goes to a faculty reviewer instead of the student."""
+        self.failure_code = (code or "FACULTY_REVIEW").strip().upper()
+        self.failure_message = (message or "This copy needs a faculty reviewer.").strip()
+        self.transition(WorkflowState.FACULTY_REVIEW, self.failure_message)
+
     @property
     def releasable(self) -> bool:
         return self.state == WorkflowState.RELEASED
@@ -176,9 +213,39 @@ def stage_label(state: WorkflowState | str) -> str:
         WorkflowState.ADJUDICATING: "Resolving grading disagreement",
         WorkflowState.AGGREGATING: "Calculating final marks",
         WorkflowState.RENDERING: "Producing evaluated PDF",
+        WorkflowState.CONFIRMING_MCQ: "Reading the unconfirmed MCQ rows once more",
         WorkflowState.RELEASE_CHECK: "Running automatic release checks",
-        WorkflowState.RELEASED: "Released",
+        WorkflowState.REPAIRING_LAYOUT: "Repairing annotation placement",
+        WorkflowState.RELEASED: "Released to the student",
+        WorkflowState.FACULTY_REVIEW: "Sent for faculty review",
         WorkflowState.UNGRADABLE: "Could not be graded automatically",
         WorkflowState.FAILED: "Failed",
     }
-    return labels[WorkflowState(state)]
+    # A missing label is a missing SENTENCE, never a reason to fail a marked copy:
+    # the unlabelled REPAIRING_LAYOUT raised KeyError here, through the progress
+    # callback, and the release gate reported it as a blocking defect of the copy.
+    try:
+        return labels[WorkflowState(state)]
+    except (KeyError, ValueError):
+        return str(getattr(state, "value", state)).replace("_", " ").capitalize()
+
+
+def safe_stage_reporter(flow: "AutomaticWorkflow"):
+    """A stage callback that reports progress and can never fail a copy.
+
+    This exists as ONE function because the same bug has now destroyed two batches
+    of marked copies: the pipeline reported a stage ("repairing_layout"), something
+    behind the callback raised - first ValueError for an unlisted state, then
+    KeyError for a state with no label - and the release gate caught it and reported
+    it as a blocking defect OF THE COPY. Progress display is not grading authority,
+    so nothing raised in here reaches the caller.
+    """
+    def report(state: str, detail: str = "") -> None:
+        try:
+            target = WorkflowState(state)
+            if flow.state != target:
+                flow.transition(target, detail)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            print(f"[stage] ignoring progress update {state!r}: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+    return report

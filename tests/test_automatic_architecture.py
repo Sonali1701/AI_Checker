@@ -285,8 +285,15 @@ check("clean verified in-budget copy releases", decision.release, decision.block
 blocked = automatic_release_decision(
     package=pkg, report=compiled, preflight_issues=[], cost=cost,
     budget_cap_inr=15, mandatory_verification_complete=False)
-check("missing automatic verification blocks release",
-      not blocked.release and "verification-incomplete" in {i.code for i in blocked.blockers})
+# POLICY, changed 2026-09-16 after a batch in which six of six copies were refused
+# and not one was refused over a wrong mark: a copy is held only when its SCORE is
+# wrong or unprovable. Everything else - presentation, wording, an uncertified row -
+# is released WITH the copy as a warning the teacher reads. A copy nobody receives
+# teaches nobody anything.
+check("an uncertified copy is released, with the teacher told",
+      blocked.release
+      and "verification-incomplete" in {i.code for i in blocked.warnings})
+
 
 class WarningIssue:
     severity = "warn"
@@ -296,9 +303,37 @@ class WarningIssue:
 warning_blocked = automatic_release_decision(
     package=pkg, report=compiled, preflight_issues=[WarningIssue()], cost=cost,
     budget_cap_inr=15, mandatory_verification_complete=True)
-check("zero-human mode upgrades actionable warnings to holds",
-      not warning_blocked.release
-      and "needs-review" in {item.code for item in warning_blocked.blockers})
+check("an actionable warning travels with the copy instead of holding it",
+      warning_blocked.release
+      and "needs-review" in {item.code for item in warning_blocked.warnings})
+
+
+class WrongScoreIssue:
+    severity = "block"
+    code = "total-mismatch"
+    detail = "Question scores do not add up to the copy total"
+
+
+score_blocked = automatic_release_decision(
+    package=pkg, report=compiled, preflight_issues=[WrongScoreIssue()], cost=cost,
+    budget_cap_inr=15, mandatory_verification_complete=True)
+check("a WRONG SCORE still holds the copy",
+      not score_blocked.release
+      and "total-mismatch" in {item.code for item in score_blocked.blockers})
+
+
+class LayoutIssue:
+    severity = "block"
+    code = "mark-overlaps-writing"
+    detail = "a mark sits on the student's writing"
+
+
+layout_blocked = automatic_release_decision(
+    package=pkg, report=compiled, preflight_issues=[LayoutIssue()], cost=cost,
+    budget_cap_inr=15, mandatory_verification_complete=True)
+check("a presentation defect does not hold the copy",
+      layout_blocked.release
+      and "mark-overlaps-writing" in {item.code for item in layout_blocked.warnings})
 
 # ...and a NOTE is the escape hatch that keeps telling us something without holding a
 # copy nobody will review. An unplaced rubric step costs a tick, not the accounting:

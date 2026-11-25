@@ -34,7 +34,7 @@ def main() -> None:
     ap.add_argument("--total", type=float, required=True)
     ap.add_argument("--human", type=float, default=None)
     ap.add_argument("--token-file", default="token.txt")
-    ap.add_argument("--provider", default="gemini")
+    ap.add_argument("--provider", default="claude")
     ap.add_argument("--model", default="")
     ap.add_argument("--no-mathpix", action="store_true")
     ap.add_argument("--fanout", action="store_true",

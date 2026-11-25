@@ -35,28 +35,39 @@ assert "description" in criterion["required"]
 # Anthropic rejects maxItems/maxLength and rejects a 16-property nested map as too
 # complex. Strict grading keeps the array compact and restricts qid to the official
 # immutable set; reconciliation rejects duplicate or missing rows.
-bounded = _grade_report_output_schema(question_qids=["Q1", "Q2", "Q16"])
+qids = [f"Q{i}" for i in range(1, 17)]
+bounded = _grade_report_output_schema(question_qids=qids)
 question_array = bounded["properties"]["questions"]
 assert question_array["type"] == "array"
-assert bounded["$defs"]["QuestionMark"]["properties"]["qid"]["enum"] == [
-    "Q1", "Q2", "Q16",
-]
+assert bounded["$defs"]["QuestionMark"]["properties"]["qid"]["enum"] == qids
 assert "annotations" not in bounded["properties"]
 assert set(bounded["properties"]) == {"questions"}
 assert "Annotation" not in bounded["$defs"]
 assert set(bounded["$defs"]["QuestionMark"]["properties"]) == {
     "qid", "score", "page", "anchor_line_id", "remark", "criteria",
     "attempted", "is_correct", "chosen_option",
+    "mark_style",
 }
 assert "chosen_option" in bounded["$defs"]["QuestionMark"]["required"]
 assert set(bounded["$defs"]["Criterion"]["properties"]) == {
     "description", "awarded", "max", "evidence", "anchor_quote", "step_line_id",
+    "rubric_criterion_id", "evidence_kind",
 }
 # anchor_quote must be REQUIRED, not optional: it is what places the tick, and a
 # model that may omit it will. See anchors.py for the measurement that forced it.
 assert "anchor_quote" in bounded["$defs"]["Criterion"]["required"]
 assert "maxItems" not in json.dumps(bounded)
 assert "maxLength" not in json.dumps(bounded)
+
+# Required-key batches avoid the one-row-valid-output failure without expanding
+# a whole large paper into the schema compiler. All nested properties are required.
+small = _grade_report_output_schema(question_qids=["Q1", "Q2", "Q6.i", "Q6.ii"])
+assert small["properties"]["questions"]["required"] == ["Q1", "Q2", "Q6.i", "Q6.ii"]
+assert small["properties"]["questions"]["additionalProperties"] is False
+assert "qid" not in small["$defs"]["QuestionMark"]["properties"]
+for definition in small["$defs"].values():
+    assert set(definition["properties"]) == set(definition["required"])
+assert len(json.dumps(small)) < 4000
 
 
 def metadata_keys(node, *, inside_name_map=False):

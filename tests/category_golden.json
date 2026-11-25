@@ -1,0 +1,818 @@
+{
+ "auto | - | -": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "9429f3195042a35b",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "auto | CA Final | Financial Reporting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "a51f033dca03fdd1",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "auto | CA Foundation | Accounting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "4afd791571161666",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "auto | CA Inter | Taxation": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "4c9f49bae95e5203",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "auto | CMA Inter | Cost Accounting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "31a49c2ee4c05317",
+  "department": "commerce",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "auto | Class 10 | Hindi": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "9572362d8ca50842",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "fbc62bf25742bfd3",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "0341583651981731"
+ },
+ "auto | Class 10 | Physics": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "2404e11f4d58ca16",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "auto | Class 11 | Accountancy": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "13d8daddac1aae0e",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "auto | Class 12 | Applied Mathematics": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "d842fb2481dfab7b",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "auto | Class 12 | Business Studies": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "f07d877e1c878da9",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "auto | Class 12 | Chemistry": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "9903471e271ec7a2",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "auto | Class 12 | Economics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "b3f37415b2dbeac2",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "bcaa148e7b398192",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "bff81e2837843fce"
+ },
+ "auto | Class 12 | English": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "b2ceb01c06cdabb1",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "fbc62bf25742bfd3",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "0341583651981731"
+ },
+ "auto | Class 9 | Biology": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "ee074bdb0a1caab8",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "auto | Class 9 | Economics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "0caa21a359e0608f",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "bcaa148e7b398192",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "bff81e2837843fce"
+ },
+ "auto | Class 9 | Social Science": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "90386ab8faeca958",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "fbc62bf25742bfd3",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "0341583651981731"
+ },
+ "professional | - | -": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "11705a2eb966c2f0",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | CA Final | Financial Reporting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "a51f033dca03fdd1",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | CA Foundation | Accounting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "4afd791571161666",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | CA Inter | Taxation": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "4c9f49bae95e5203",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | CMA Inter | Cost Accounting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "31a49c2ee4c05317",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 10 | Hindi": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "448bc7695c295b5c",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 10 | Physics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "e7a71cb8cd0f72e3",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 11 | Accountancy": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "a9c52ec7e58954c3",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 12 | Applied Mathematics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "34cdb15c01d88c2a",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 12 | Business Studies": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "bdb7f54195cfaa07",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 12 | Chemistry": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "41f7236f9d4bdcbc",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 12 | Economics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "237d36e8209f88dd",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 12 | English": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "d780fe6464c22319",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 9 | Biology": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "b56cfb673bdfd52c",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 9 | Economics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "baf1c5cf8bf73faa",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "professional | Class 9 | Social Science": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "ba5d7e19b7fa3651",
+  "department": "ca",
+  "exam_type": "professional",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.6,
+  "marks_prompt": "fd2fa814d084ea3d",
+  "moderation": true,
+  "recovery_prompt": "4a3bdfa7869a81ab",
+  "rubric_prompt": "45d5f63fb6b8de11",
+  "system_prompt": "4b706ec82a7901ea"
+ },
+ "school | - | -": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "9429f3195042a35b",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | CA Final | Financial Reporting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "5016e969a84b2b0d",
+  "department": "ca",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | CA Foundation | Accounting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "9ba752190034ce3d",
+  "department": "ca",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | CA Inter | Taxation": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "first_attempted",
+  "context": "0d0bd48fc1dd25fe",
+  "department": "ca",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | CMA Inter | Cost Accounting": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "10884cb6b7b292b5",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | Class 10 | Hindi": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "9572362d8ca50842",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "fbc62bf25742bfd3",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "0341583651981731"
+ },
+ "school | Class 10 | Physics": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "2404e11f4d58ca16",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "school | Class 11 | Accountancy": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "13d8daddac1aae0e",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | Class 12 | Applied Mathematics": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "d842fb2481dfab7b",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "school | Class 12 | Business Studies": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "f07d877e1c878da9",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "80bf215fd1c3a8ad",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "07af823d6ad1e153"
+ },
+ "school | Class 12 | Chemistry": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "9903471e271ec7a2",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "school | Class 12 | Economics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "b3f37415b2dbeac2",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "bcaa148e7b398192",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "bff81e2837843fce"
+ },
+ "school | Class 12 | English": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "b2ceb01c06cdabb1",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "fbc62bf25742bfd3",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "0341583651981731"
+ },
+ "school | Class 9 | Biology": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "ee074bdb0a1caab8",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "6c1bee9362bb03bb",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "faa41b1e2e24e02b"
+ },
+ "school | Class 9 | Economics": {
+  "budget_inr": 18.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "0caa21a359e0608f",
+  "department": "commerce",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 0.8,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": true,
+  "recovery_prompt": "bcaa148e7b398192",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "bff81e2837843fce"
+ },
+ "school | Class 9 | Social Science": {
+  "budget_inr": 12.0,
+  "choice_best": "best_score",
+  "choice_first": "best_score",
+  "context": "90386ab8faeca958",
+  "department": "school",
+  "exam_type": "school",
+  "examiners": [
+   "gpt-5.6-luna-ard-content"
+  ],
+  "mark_scale": 1.0,
+  "marks_prompt": "c1da797432a56630",
+  "moderation": false,
+  "recovery_prompt": "fbc62bf25742bfd3",
+  "rubric_prompt": "b2b24d776167fbf5",
+  "system_prompt": "0341583651981731"
+ }
+}

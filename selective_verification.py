@@ -5,6 +5,7 @@ import math
 import re
 from dataclasses import dataclass
 
+from exam_package import normalize_qid
 from remark_quality import remark_quality_problem
 
 
@@ -63,6 +64,17 @@ def verification_candidates(report) -> list[VerificationCandidate]:
     choice_candidates = set(getattr(report, "choice_candidate_qids", None) or [])
     visual_required = set(
         getattr(report, "mandatory_verification_qids", None) or [])
+    commerce_checks = set(
+        getattr(report, "commerce_feedback_verification_reasons", None) or {})
+    placement_risks = set(getattr(report, "placement_risk_qids", []) or [])
+    unfixed = set(getattr(report, "rubric_unfixed_qids", []) or [])
+    recovered = set(getattr(report, "coverage_recovered_qids", []) or [])
+    regraded = set(getattr(report, "regraded_qids", []) or [])
+    # Credited steps whose own evidence is not on the page ("QID:index" keys).
+    unsupported: dict[str, int] = {}
+    for key in dict(getattr(report, "unsupported_credit", None) or {}):
+        qkey = str(key).rsplit(":", 1)[0]
+        unsupported[qkey] = unsupported.get(qkey, 0) + 1
     candidates: list[VerificationCandidate] = []
     for question in list(getattr(report, "questions", None) or []):
         qid = str(getattr(question, "qid", "") or "")
@@ -76,9 +88,32 @@ def verification_candidates(report) -> list[VerificationCandidate]:
         risk = 0.0
         mandatory = False
         criteria = list(getattr(question, "criteria", None) or [])
-        if qid in visual_required:
-            reasons.append("official-instruction-requires-visual-artifact")
+        if qid in recovered:
+            reasons.append("question-recovered-after-primary-omission")
             risk += 90
+            mandatory = True
+        if qid in regraded:
+            reasons.append("question-regraded-after-invalid-breakdown")
+            risk += 90
+            mandatory = True
+        if qid in placement_risks:
+            reasons.append("answer-evidence-or-placement-uncertain")
+            risk += 95
+            mandatory = True
+        if qid in unfixed:
+            reasons.append("key-has-no-fixed-step-allocation")
+            risk += 15
+            mandatory = True
+        if qid in visual_required:
+            reasons.append("commerce-feedback-requires-original-image-check"
+                           if qid in commerce_checks else
+                           "official-instruction-requires-visual-artifact")
+            risk += 90
+            mandatory = True
+        flagged = unsupported.get(normalize_qid(qid), 0)
+        if flagged:
+            reasons.append(f"{flagged}-credit(s)-without-page-evidence")
+            risk += 100
             mandatory = True
         if qid in unverified_objectives:
             reasons.append("provider-claimed-unofficial-objective")

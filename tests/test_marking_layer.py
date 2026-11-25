@@ -15,8 +15,8 @@ Each case here is a defect measured on a real evaluated copy:
       entry lands is covered by test_strip_layout.)
   P6  step marks drew at 8.6-9.1pt and whole-answer marks at 14.0-14.8pt, a 1.6x
       gap, with both appearing on one page of the Accounting copy.
-  P7  two renderers, 532 lines, were unreachable and both still drew a tick on
-      partial credit - the exact rule the live path had been fixed for.
+  P7  two renderers, 532 lines, were unreachable and still used obsolete
+      partial-credit glyph rules.
 """
 import os
 import sys
@@ -77,11 +77,14 @@ render(doc, "Q4", 3, 4, [
     Criterion(description="d", awarded=1, max=1, met=True, evidence="", step_line_id="p1_l3"),
 ], ls)
 drawn = [sp["text"].strip() for sp in reds(doc[0])]
-check("the zero step is drawn, not silently dropped", "0" in drawn, drawn)
-check("all four steps now appear", sum(1 for t in drawn if t in ("0", "1")) == 4, drawn)
-zero_y = [sp["bbox"][1] for sp in reds(doc[0]) if sp["text"].strip() == "0"]
-check("it sits on the line the model named",
-      zero_y and 130 <= zero_y[0] <= 175, f"y={zero_y}")
+check("the cross does not carry a circled zero", "0" not in drawn, drawn)
+check("all three earned step marks remain", drawn.count("1") == 3, drawn)
+wrong_row = fitz.Rect(300, 130, 355, 175)
+zero_paths = [d for d in doc[0].get_drawings() if d["rect"].intersects(wrong_row)
+              and d.get("color") and d["color"][0] > .6]
+check("the wrong step still has a visible cross on its own line", len(zero_paths) >= 8, len(zero_paths))
+check("no circle is drawn after that cross",
+      not any(len(d["items"]) == 4 and all(i[0] == "c" for i in d["items"]) for d in zero_paths))
 doc.close()
 
 print("== but a zero on a GUESSED line is still dropped ==")
@@ -257,11 +260,17 @@ print("== P7: the unreachable renderers are gone ==")
 for dead in ("_render_question_marks_LEGACY", "_annotate_student_page",
              "_draw_hand_circle", "_draw_remark_on_band", "_is_synthetic_anchor"):
     check(f"{dead} no longer exists", not hasattr(pr, dead))
-src = open(pr.__file__, encoding="utf-8").read()
-check("no tick is drawn on partial credit anywhere in the module",
-      "partial_credit" not in src)
-check("the one surviving tick rule is the full-marks rule",
-      src.count("fully_earned") >= 2)
+from unittest.mock import patch
+
+doc = sheet()
+partial_line = lines(1, [80.0])[0]
+pr._MARK_BOXES.clear()
+with patch.object(pr, "_draw_tick", wraps=pr._draw_tick) as partial_tick, \
+     patch.object(pr, "_draw_cross", wraps=pr._draw_cross) as partial_cross:
+    placed_partial = pr._draw_sheet_verdict(doc, "Q1", partial_line, "partial")
+check("partial credit is marked with one tick and no cross",
+      placed_partial and partial_tick.call_count == 1 and partial_cross.call_count == 0)
+doc.close()
 
 print("== P5: languages and humanities finally have conventions ==")
 for subject in ("English", "Hindi", "Sanskrit", "Social Science", "History",

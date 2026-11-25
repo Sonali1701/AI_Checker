@@ -45,7 +45,7 @@ async def start(*, token: str = "", source: str = "ai_unverified"):
         answer_sheets=[UploadFile(file=io.BytesIO(b"%PDF-sheet"), filename="sheet.pdf")],
         question_paper=UploadFile(file=io.BytesIO(PAPER), filename="paper.pdf"),
         answer_key=UploadFile(file=io.BytesIO(b"%PDF-key"), filename="key.pdf"),
-        provider="gemini",
+        provider="claude",
         model="",
         student_class="Class 11",
         subject="Economics",
@@ -94,7 +94,7 @@ try:
             answer_sheets=[UploadFile(file=io.BytesIO(b"%PDF-sheet"), filename="sheet.pdf")],
             question_paper=UploadFile(file=io.BytesIO(PAPER), filename="paper.pdf"),
             answer_key=UploadFile(file=io.BytesIO(b"%PDF-key"), filename="key.pdf"),
-            provider="gemini", model="", student_class="Class 11",
+            provider="claude", model="", student_class="Class 11",
             subject="Economics", exam_type="school", total_marks="3",
             exam_level="Class 11", paper_code="", exam_attempt="",
             applicable_law_date="", key_source="upload",
@@ -115,14 +115,14 @@ try:
     server._MARKS_ATTESTATIONS = MarksAttestationStore()
     server.JOBS = {}
     cfg = cfg_from_request(
-        "gemini", "", "Economics", google_token="google-token",
+        "claude", "", "Economics", google_token="google-token",
         task_id="evaluate-task", student_class="Class 11",
         exam_type="school", total_marks=3,
     )
     context = server._marks_extraction_context(cfg, "Class 11", "Economics")
     record = server._MARKS_ATTESTATIONS.create(
         PAPER, 3, SCHEME, SCHEME,
-        extractors=("claude:sonnet", "gemini:flash"), context=context,
+        extractors=("claude:sonnet", "claude:opus"), context=context,
     )
     server.detect_marks_scheme = lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("cache hit must not run deterministic extraction"))

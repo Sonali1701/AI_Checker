@@ -48,7 +48,9 @@ bad = GradeReport(total_score=10, max_total=91, overall_remarks="x", questions=[
     q("Q2", 0, 5, "[Not graded. ]."),                   # internal marker on the copy
     q("Q3", 3, 5, ""),                                  # lost marks, no reason
     q("Q4", 1, 4, "Freight of Rs 10,000 should be excluded from cost - student appears "
-                  "to have included it; working notes present and format correct",
+                  "to have included it; working notes present and format correct, and the "
+                  "closing stock figure was also carried forward without the adjustment "
+                  "that the question asked for in its second paragraph",
       [Criterion(description="freight", awarded=1, max=4, met=True, evidence="")]),
 ])
 got = check_copy(bad, total_marks=86)

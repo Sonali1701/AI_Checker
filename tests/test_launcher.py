@@ -155,6 +155,9 @@ srv = HTTPServer(("127.0.0.1", rc._PORTS[0]), Health)
 t = threading.Thread(target=srv.serve_forever, daemon=True)
 t.start()
 try:
+    check("the build of a running copy is reported", rc._running_build(rc._PORTS[0]) == rc.BUILD_ID,
+          rc._running_build(rc._PORTS[0]))
+    check("a port nobody is on reports no build", rc._running_build(rc._PORTS[-1]) == "")
     check("an answering AI Checker is detected", rc._already_running(rc._PORTS[0]),
           "this is what sends the user to the copy they already have open")
     check("a port nobody is on is not", not rc._already_running(rc._PORTS[-1]))
@@ -196,9 +199,56 @@ try:
           rc._open_browser("http://127.0.0.1:8765") is True)
     check("normal mode opens the requested local URL",
           opened_urls == ["http://127.0.0.1:8765"], opened_urls)
+    opened_urls.clear()
+    os.environ["AICHECKER_START_PAGE"] = "/workflow.html"
+    rc._open_browser("http://127.0.0.1:8765")
+    rc._open_browser("http://127.0.0.1:8768")
+    check("workflow shortcut opens the workflow on either chosen port",
+          opened_urls == ["http://127.0.0.1:8765/workflow.html", "http://127.0.0.1:8768/workflow.html"], opened_urls)
+    check("workflow URL is not appended twice",
+          rc._browser_url("http://127.0.0.1:8765/workflow.html") == "http://127.0.0.1:8765/workflow.html")
+    os.environ["AICHECKER_START_PAGE"] = "https://example.com"
+    check("unsupported start pages retain the checker home",
+          rc._browser_url("http://127.0.0.1:8765") == "http://127.0.0.1:8765")
 finally:
     os.environ.pop("AICHECKER_NO_BROWSER", None)
+    os.environ.pop("AICHECKER_START_PAGE", None)
     rc.webbrowser.open = original_browser_open
+
+print("\n== the workflow EXE entry opens the workflow page ==")
+os.environ.pop("AICHECKER_START_PAGE", None)
+try:
+    import importlib
+    import run_workflow
+    importlib.reload(run_workflow)
+    check("run_workflow selects the workflow page",
+          rc._browser_url("http://127.0.0.1:8765") == "http://127.0.0.1:8765/workflow.html")
+    check("run_workflow reuses the checker launcher", run_workflow.run_client is rc)
+finally:
+    os.environ.pop("AICHECKER_START_PAGE", None)
+check("the checker entry keeps the home page",
+      rc._browser_url("http://127.0.0.1:8765") == "http://127.0.0.1:8765")
+
+print("\n== an OLDER build still running is named, not joined (12 Oct) ==")
+originals = (rc._setup_logging, rc._disable_quickedit, rc._port_free,
+             rc._already_running, rc._running_build, rc._hold, rc.uvicorn.run)
+held_messages, started = [], []
+try:
+    rc._setup_logging = lambda: None
+    rc._disable_quickedit = lambda: None
+    rc._port_free = lambda port: port != rc._PORTS[0]
+    rc._already_running = lambda _port: False
+    rc._running_build = lambda port: "2026.10.12.102-old" if port == rc._PORTS[0] else ""
+    rc._hold = held_messages.append
+    rc.uvicorn.run = lambda *args, **kwargs: started.append(kwargs.get("port"))
+    rc.main()
+finally:
+    (rc._setup_logging, rc._disable_quickedit, rc._port_free,
+     rc._already_running, rc._running_build, rc._hold, rc.uvicorn.run) = originals
+check("main does not start a second server beside an older build", started == [], started)
+check("main names the older build and how to close it",
+      len(held_messages) == 1 and "2026.10.12.102-old" in held_messages[0] and "Task Manager" in held_messages[0],
+      held_messages)
 
 print("\n== env override still wins ==")
 os.environ["AICHECKER_PORT"] = "9111"

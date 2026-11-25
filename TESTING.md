@@ -1,9 +1,137 @@
 # Verifying the grader
 
+The Model Answer step of 19 Nov 2026 is in `tests/test_autopilot_model_answer_1119.py`: a test the
+portal has no Model Answer for waits for a person to give one instead of being skipped. A change to
+`Autopilot.prepare` needs that suite and `test_workflow_autopilot.py` together, because the skip it
+replaces is asserted there too. `docs/AUTOPILOT_MODEL_ANSWER.md` describes the step.
+
+Build 162 keeps the paper's printed tags from refusing a scheme the paper's own total supports
+(`test_tags_against_official_total_1105.py`) and lets a choice rule name a question whose rows are its
+parts (`test_operator_choice_parts_1103.py`). A change to either check needs the CA protections in
+`tests/test_scheme_fidelity.py` run as well: they are a script, not pytest.
+
+Build 161 passes a copy taken elsewhere (`test_copy_moved_on_1102.py`), keeps runs of earlier Autopilots
+out of a restart and within Stop's reach (`test_old_autopilot_runs_1102.py`), and names a wait for
+memory (`test_memory_wait_1102.py`). Two timing tests in `test_integrated_workflow.py` can fail in a full
+suite run beside a live run on a short-of-memory machine. Re-run them alone before calling them faults.
+
+Build 160 keeps a workflow reading that lands on the official total, in `test_marks_scan_1102.py`. A
+change to one marks gate needs a run through the whole of `detect_marks`, as later gates can stop the
+same paper again.
+
+Build 159 limits the pages the orientation probe sees, in `test_big_pages_1101.py`, and counts struck
+rows at once, in `test_struck_lines_row_count_1101.py`, which keeps the old reading to compare with.
+Beside a live run, run the start-up checks alone at normal priority.
+
+Build 157 waits for a lost internet connection, in `test_workflow_copy_retries.py`, and has the
+marks-problem list, in `test_marks_problem_links_1031.py` and `tools/smoke_workflow_autopilot.py`.
+The double count is in `test_marks_double_count_1031.py`. On a busy PC run the start-up checks on
+their own, not beside the suite.
+
+Build 154 skips copies over 100 pages, unread: see `test_workflow_copy_retries.py`, including a copy
+downloaded before a restart.
+
+Build 153 unpacks outside Temp: `test_unpack_outside_temp_1031.py` covers the clearing of killed
+copies and the retried autopilot save, and `tools/smoke_release.py` refuses an EXE that would unpack
+into Temp.
+
+The Autopilot's several student tabs are covered in `test_autopilot_tabs_1031.py`: order, a copy
+in two tabs, statuses saved in each test's own tab, and the sheets read once.
+
+Build 151 gives full-mark copies a comment, counts direct refusals, keeps reading a copy direct,
+shares a test's paper and key across its copies, runs below normal priority and checks 10 copies
+at once with a memory guard. Covered in `test_portal_api_1030.py`. Speed and memory not yet measured live.
+
+Build 150 adds direct portal requests. `test_portal_api_1030.py` covers each step on a fake portal:
+the guards, read-back, a retry not sending the PDF twice, the browser taking over, direct
+requests turning off after a wrong answer, and a busy portal costing no attempt. The sign-in and
+every read were run on the live portal as tab 3's IDs, and on 30 Oct four real copies went through
+assign, check and upload (docs/WORKFLOW_TEST_REPORT.md). The Autopilot card itself was not run with it.
+
+Build 149 is about running a test again. `test_workflow_rerun_1030.py` covers a finished check
+moving to the new run with no second check, a changed paper, key or total being checked again,
+skipped copies picked up, finished ones left out, a run never started, a PDF with no saved marks,
+a student's new submission, and the totals. All on offline doubles.
+
+Build 148 has AI read every workflow paper's marks. `test_marks_ai_first_1030.py` covers AI
+keeping its finer rows, the paper's own marks taking over when AI fails or gives a question
+other marks, a split the paper leaves open decided by the reader but still bound to the
+official total, and the autopilot waiting out an AI outage. All on offline doubles.
+
+Build 148 makes the check independent of assignment and upload.
+`test_workflow_check_first_1030.py` covers a portal hanging on an assignment, a refused
+evaluator stopping only the portal lanes and Resume not checking again, an already
+evaluated copy found before and after its check, a lost assignment confirmation after
+the check, rejections assigned before they are posted, older saved runs, and a checked
+copy staying in its run. All on the offline doubles: not yet run on the live portal.
+
+Build 147 decides every copy without faculty holds, caches the shared part of the
+grading prompt across copies of a test, and probes page orientation eight pages at
+a time. `test_no_faculty_gates_1029.py` covers junk rejected only when the
+page-image look agrees with the text check, genuine copies graded, and the
+whole-test wrong-paper guard. `test_prompt_cache_1029.py` checks that two copies of
+a test send the same cached prefix with the booklet notes after it, that copies
+sent together pay one cache write, and the workflow's 5-minute TTL.
+`test_orientation_batches_1029.py` covers batches of eight, a failed batch and
+one-page replies. `python tools/try_sheet_look.py --token-file token.txt --paper
+paper.pdf COPY.pdf ...` runs the page-image look live (about Rs 3 a copy); it has
+not been run on real pages yet. Providers are mocked in these tests: the cache
+saving shows in a live run's cache read tokens.
+
+Build 145 adds shared account cooldowns and safe HTTP/network diagnostics for
+portal task-list failures. `test_workflow_fetch_recovery.py` checks queued student
+requests, recovery, separate accounts, Retry-After, Stop and the Submit boundary.
+`python tools/smoke_workflow_fetch_recovery.py` exercises real headless Chrome
+with intercepted HTTP 503/200 replies: eight queued copies make no requests during
+cooldown, and a valid program row recovers despite a stale toast. External portal
+traffic and paid grading are not used by this test.
+
+Build 144 adds automatic Test Evaluation routing, student-sheet status writeback,
+safe retries of failed saved rows, and cleanup of completed copy PDFs plus internal
+workflow grading jobs. Focused regressions are in
+`test_portal_vendor_collection_choice.py`, `test_workflow_status_writeback.py`,
+`test_workflow_sheet_status.py`, `test_workflow_cleanup.py`, and
+`test_workflow_job_cleanup.py`. `node --test tests/test_workflow_sheets_ui.cjs`
+checks edit consent and terminal-row selection. The connected and sheet-access
+browser smokes use offline Google/portal fixtures; they verify writeback and file
+removal without touching live students. Windows asyncio/browser checks require
+local loopback networking. Completed checked PDFs now return 404 after cleanup;
+reports and shared exam documents remain. `smoke_release.py` verifies both new
+modules and browser assets against the packaged source.
+
+Build 117 fixes Skills marks verification with its intentionally hidden Class field.
+Detection and evaluation bind a blank class to the category's same level label;
+explicit classes and all other proof fields remain distinct. Run
+`python -m pytest tests/test_skills_marks_context.py -q` for the ten-question,
+200-mark assignment flow, proof reuse and rejection of changed contexts, papers,
+question rows, totals and expired/forged proofs. `node --test tests/test_marks_ui.cjs`
+also exercises one-click Skills verification and evaluation with a blank class.
+Providers are mocked in these regressions; they do not measure live grading accuracy.
+
+Build 90 adds optional PDF page ranges and a combined question-paper/answer-key
+upload. `tests/test_pdf_page_ranges.py` and `tests/test_pdf_range_routes.py` verify
+selection, unchanged blank-range bytes, deterministic proof hashes and existing
+route consumers. `python tools/smoke_pdf_ranges_ui.py` checks both interfaces with
+offline browser fixtures. `python tools/smoke_release.py <staged-exe>` checks the
+packaged helper, optional forms, exact browser assets and frozen worker startup.
+This feature does not change grading or release logic.
+
+Build 35 adds `test_verification_ownership.py`: an unnumbered answer blocked by
+overlapping primary anchors can be proposed from fresh examiner references. All
+affected rows must receive another visual certificate before release; grades are
+never copied from the ownership proposal. The checking-plan suite also covers
+single prose explanations about transactions and recovery of checking/award IDs
+only from unique quotes inside the same answer.
+
 > Production note: `/api/evaluate` now uses the strict Exam Package v2 path described
 > in `docs/AUTOMATIC_GRADING_ARCHITECTURE.md`. Several older suites intentionally lock
 > down legacy repair/rescale behavior used by archived comparison tools; strict jobs
 > reject those conditions instead of repairing them.
+>
+> As of build 15, the operator has disabled monetary caps for desktop grading.
+> Historical cap tests and measurements below describe explicitly capped modes.
+> `test_uncapped_grading.py` exercises expensive primary/recovery/verification work,
+> PDF release, cost reporting, and continued rejection of unverified marks.
 
 Two levels: **offline suites** that must pass before every build, and an
 **accuracy run** against human-marked booklets that needs a signed-in token.
@@ -17,18 +145,69 @@ python tools/selftest.py
 Runs everything in `tests/`. Each suite reproduces a defect that actually reached a
 teacher's screen, so a green run means those cannot come back silently:
 
+- `test_teacher_layout.py` — the teacher layout (build 41): one tick size per copy from the
+  student's row pitch; a tick or cross AND a circled mark beside every answer, to the RIGHT of
+  it (after the last line of the point, else past the divider, never on the writing); a
+  point anchored on its first line is ticked where it ends; the margin reads "Q7.c 1.5/3"
+  with the reason under it and entries never overlap; the question anchor on the last line
+  of an answer does not swallow the previous point.
+- `test_wording.py` — nothing a student reads carries a semicolon or a dash; remarks are
+  plain sentences ("Ans: C" becomes "Correct answer is (C).").
+- `test_on_sheet_scores.py` — circled question totals and step marks remain on the
+  original answer sheet; the right strip also contains question scores and feedback. Includes dense
+  rows, dark borders, false table continuations, missing totals and full/partial/zero awards.
+
 - `test_automatic_architecture.py` — immutable package, strict compilation, internal
   choice, terminal workflow, and fail-closed release.
+- `test_integrated_workflow.py`, `test_workflow_portal_adapter.py` — the sheet → assign →
+  download → grade → upload workflow (docs/INTEGRATED_WORKFLOW.md): stage order, resume,
+  uncertain portal outcomes, rejected copies posted only on request, and the identity guards
+  on the vendored portal engine. Use the default temp dir or a short `--basetemp`.
+- `test_portal_vendor_*.py` — the Data_Filler supplier's 90 regression tests, run against
+  `portal_vendor/` (bundle assignment, evaluator dropdown recovery, rejection upload/comment).
 - `test_answer_map.py` — unresolved OCR mapping never becomes an assumed blank.
 - `test_budget_ledger.py` — ₹15/₹20 policy, mixed-model accounting, and protected
   verification reserves.
 - `test_job_store.py` — restart durability without ambiguous provider-call replay.
 - `test_selective_verification.py` — deterministic mandatory-risk selection.
+- `test_marks_visual_recovery.py` — boundary rejection and truncated replies recover
+  once from original page images; scanned/mixed/image papers can be attested;
+  unresolved evidence, provider disagreement and rate limits remain explicit.
+- `test_marks_identity.py` — recorded Q5(A) unnumbered/roman label drift and explicit
+  nested group references reach verification without another provider call;
+  printed numerals, wrong maxima, ambiguous references and changed choices remain distinct.
+- `test_question_regrading.py` — all invalid step breakdowns are collected before
+  compilation and regraded in bounded batches against the original evidence;
+  accepted rows stay intact, fixed rubrics remain immutable, and fresh decisions
+  must pass independent verification before PDF release. Includes the 38-row CA graph.
+- `test_step_key_layout.py` — dense digital solution PDFs with separate step-mark
+  labels retain their images. Primary grading, question regrading and both independent
+  verifiers receive the visual marking key; reservations include those images.
+  A 28-page scanned-evidence regression checks compression against the 32 MB
+  request limit for both verifiers.
+- Visual-key regrading also permits one stronger-model pass for still-invalid
+  breakdowns. It retains successful repairs, reserves the actual alternate model,
+  and leaves the original report untouched if any final breakdown remains invalid.
+- The question-regrading suite also checks an “any four” answer with four correct
+  points and two wrong surplus attempts: the denominator and earned score stay four.
+- `test_choice_answer_recovery.py` — `C2)` labels and a misread digit inside a roman
+  list retain the answer region; unsupported surplus-alternative claims require
+  re-reading and are never deterministically converted to blank answers.
+  It also covers Part-A numeric MCQ keys, restarted Part-B labels, lists within
+  descriptive answers, and final choice reports checked against all printed options.
+- `test_mcq_scores.py` also checks warning-level ink clearance and separate
+  objective/descriptive totals when both parts use the same question numbers.
+  MCQ verdicts stay to the right of their own answers, including tight columns.
+  The strip attaches directly to each original page with no additional padding;
+  the release check rejects a gap between the page and its score strip.
+- `test_marks_ui.cjs` — one-click verification followed by evaluation, including
+  failed verification, concurrent clicks, stale proofs and changed uploads.
 
 | Suite | What it locks down |
 |---|---|
 | `test_marks_enforcement.py` | The official paper total is enforced, not just warned about: an authoritative scheme forces per-question maxima, a repair pass re-allocates when they still disagree, and a deterministic rescale guarantees the denominator by construction. Reproduces the 58.5/64.5-on-a-50-mark-paper report. |
 | `test_moderation.py` | The second-examiner pass restores marks for deductions it can disprove, never deducts further, never touches objective (MCQ) items or forced maxima, and caps every restore at the original deduction. |
+| `test_mark_parity.py` | Every answer comes back marked, in one marker's hand. A cross is drawn the same size as a tick (the two primitives scale differently, so passing the cross a fraction of the tick's size drew it at under half the extent — 25.1pt against 12.8pt on the released Physics copy). A part-marked answer and a step-marked answer whose steps all went unplaced each used to come back with nothing on them at all. And `_fit_beside_marks` no longer slides a mark clear of its neighbour and then clamps it straight back on top. |
 | `test_routing_and_jobs.py` | CA/commerce/STEM papers route to `gemini-2.5-pro` — including an assertion that `static/app.js` does **not** pin a model (a hard-coded `gemini-2.5-flash` there silently defeated the routing for every sheet graded in the app). Also: tolerant JSON parsing for all four model replies, job results unreadable without their download key, and job eviction. |
 
 ## 2. Accuracy against human evaluators — needs a token

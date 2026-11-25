@@ -22,11 +22,18 @@ import fitz
 from grader import (Criterion, GradeReport, QuestionMark,  # noqa: E402
                     pdf_or_image_to_pngs)
 from mathpix import LineBox, PageOCR  # noqa: E402
-from pdf_renderer import _ENUM_LINE_RE, build_evaluated_pdf  # noqa: E402
+from pdf_renderer import _ENUM_LINE_RE, build_evaluated_pdf, STRIP_MIN_WIDTH, STRIP_FRACTION  # noqa: E402
+
+# A legacy-contract suite: marks stay inside the sheet and within reach of their
+# evidence row, and checking plans are drawn. The teacher layout (the product
+# default) has its own contract in test_teacher_layout.py.
+import pdf_renderer as _pr
+_pr.TEACHER_LAYOUT = False
 
 FAILS = []
 OCR_W, OCR_H = 1500, 2000
 SHEET_W, SHEET_H = 600.0, 800.0
+MARGIN_W = max(STRIP_MIN_WIDTH, SHEET_W * STRIP_FRACTION)
 PER_POINT_CLUSTERS = 2      # a tick and a circled mark are drawn side by side
 
 
@@ -91,7 +98,8 @@ def _strip_text(pdf_bytes):
                   for block in doc[i].get_text("dict")["blocks"]
                   for line in block.get("lines", [])
                   for span in line["spans"]
-                  if span["bbox"][0] >= SHEET_W - 2)
+                  if span["bbox"][0] >= doc[i].rect.width - MARGIN_W
+                  and span["bbox"][1] >= doc[i].rect.height - SHEET_H)
     doc.close()
     return out
 
@@ -107,7 +115,8 @@ def _clusters(pdf_bytes):
                     and colour[1] < 0.4 and colour[2] < 0.4):
                 continue
             rect = drawing["rect"]
-            if rect.x0 >= SHEET_W or rect.width > 300 or rect.height > 300:
+            if (rect.x0 >= doc[i].rect.width - MARGIN_W or rect.y0 < doc[i].rect.height - SHEET_H
+                    or rect.width > 300 or rect.height > 300):
                 continue
             points.append((i, (rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2))
     doc.close()

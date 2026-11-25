@@ -46,7 +46,7 @@ print("== server-side routing ==")
 # moderation pass instead (see the cost policy in pipeline.py). gemini-2.5-pro cannot
 # meet the per-copy budget for bulk grading: this proxy strips thinkingConfig and pro
 # spends ~9k uncapped thinking tokens per 2 pages, billed as output.
-from pipeline import AUDIT_MODEL, _BUDGET_GRADING_MODEL, audit_model_for
+from pipeline import _BUDGET_GRADING_MODEL, audit_model_for
 check("CA Foundation -> budget grader", cfg(student_class="CA Foundation",
       subject="Accounting").model == _BUDGET_GRADING_MODEL)
 check("explicit exam_type=professional -> budget grader",
@@ -62,14 +62,13 @@ check("school Physics -> budget grader", cfg(student_class="Class 11",
 from pipeline import _CLAUDE_SECOND_OPINION_MODEL
 professional = cfg(exam_type="professional")
 check("claude-graded sheets are audited by claude's STRONGER model, not themselves",
-      audit_model_for(professional) == _CLAUDE_SECOND_OPINION_MODEL
-      if professional.provider == "claude" else
-      audit_model_for(professional) == AUDIT_MODEL)
+      audit_model_for(professional) == _CLAUDE_SECOND_OPINION_MODEL)
 check("the claude auditor is never the same as the grader",
-      audit_model_for(professional) != professional.model
-      if professional.provider == "claude" else True)
-check("gemini-graded sheets are audited by the pro model",
-      audit_model_for(cfg(model="gemini-2.5-flash", subject="English")) == AUDIT_MODEL)
+      audit_model_for(professional) != professional.model)
+check("a Gemini request is graded AND audited on Claude (Gemini is switched off)",
+      cfg(model="gemini-2.5-flash", subject="English").is_claude
+      and audit_model_for(cfg(model="gemini-2.5-flash", subject="English"))
+      == _CLAUDE_SECOND_OPINION_MODEL)
 # EVERY paper gets the measured grader now, not just "reasoning" subjects: the old
 # split quietly sent Business Studies (a commerce subject) to a different model than
 # the Accountancy paper beside it.
@@ -77,14 +76,14 @@ for _subject in ("English", "Business Studies", "Hindi", "Social Science", "Phys
     check(f"{_subject or '(blank subject)'} -> budget grader",
           cfg(student_class="Class 11", subject=_subject).model == _BUDGET_GRADING_MODEL,
           cfg(student_class="Class 11", subject=_subject).model)
-check("claude budget model flips the provider too",
-      cfg(subject="Accountancy").provider == ("claude" if _BUDGET_GRADING_MODEL.startswith("claude")
-                                              else "gemini"))
+check("every route is Claude", cfg(subject="Accountancy").provider == "claude")
 check("an explicit claude request with no model gets the budget grader, not opus",
       cfg_from_request("claude", "", "Accounting", google_token="t",
                        task_id="x").model == _BUDGET_GRADING_MODEL)
-check("explicit model still wins", cfg(model="gemini-2.5-flash-lite",
-                                       student_class="CA Inter").model == "gemini-2.5-flash-lite")
+check("explicit Claude model still wins", cfg(model="claude-haiku-4-5",
+                                       student_class="CA Inter").model == "claude-haiku-4-5")
+check("a Gemini model id never reaches the grader", cfg(model="gemini-2.5-flash-lite",
+      student_class="CA Inter").model == _BUDGET_GRADING_MODEL)
 check("professional detected from class text", cfg(student_class="CA Inter Group 1",
                                                    subject="Advanced Accounting").exam_type
       == "professional")
@@ -187,29 +186,61 @@ pdf = server.job_pdf("job1", 0, "secretkey")
 check("pdf with key returns the pdf", pdf.body.startswith(b"%PDF"))
 check("zip with key -> 200", status_of(lambda: server.job_zip("job1", "secretkey")) == 200)
 server.JOBS["job1"]["results"][0]["release"] = False
+server.JOBS["job1"]["results"][0]["state"] = "failed"
 server.JOBS["job1"]["results"][0]["warning"] = "Exact automatic blocker"
 held_status = json.loads(server.job_status("job1", "secretkey").body)
 held_public = held_status["results"][0]
-check("held status redacts the provisional score",
+check("a failed copy's status redacts the provisional score",
       held_public.get("held") is True
       and not any(field in held_public for field in
                   ("score", "max", "percent", "remarks", "questions")),
       held_public)
-check("held status keeps the actionable blocker while redacting the mark",
+check("a failed copy's status keeps the actionable reason while redacting the mark",
       held_public.get("error") == "Exact automatic blocker", held_public)
-check("held pdf is denied even with the key",
+check("a failed copy's pdf is denied even with the key",
       status_of(lambda: server.job_pdf("job1", 0, "secretkey")) == 409)
-check("zip with no released copies is denied",
+check("zip with no marked copies is denied",
       status_of(lambda: server.job_zip("job1", "secretkey")) == 409)
+# 2026-09-19: a copy the gate would not send to the student is not lost. It is a
+# FACULTY REVIEW copy: its marks and reasons are shown, its PDF downloads under a
+# review name, and the zip files it apart from the student copies.
+server.JOBS["job1"]["results"][0]["state"] = "faculty_review"
+server.JOBS["job1"]["results"][0]["review_reasons"] = ["Exact automatic blocker"]
+review_status = json.loads(server.job_status("job1", "secretkey").body)
+review_public = review_status["results"][0]
+check("a faculty-review copy's status carries its marks and reasons",
+      review_public.get("release") is False and review_public.get("state") == "faculty_review"
+      and review_public.get("review_reasons") == ["Exact automatic blocker"]
+      and "score" in review_public, review_public)
+review_pdf = server.job_pdf("job1", 0, "secretkey")
+check("a faculty-review pdf downloads under a review file name",
+      review_pdf.body.startswith(b"%PDF")
+      and "FACULTY_REVIEW_" in review_pdf.headers.get("content-disposition", ""),
+      review_pdf.headers.get("content-disposition"))
+import io
+import zipfile as _zipfile
+review_zip = _zipfile.ZipFile(io.BytesIO(server.job_zip("job1", "secretkey").body))
+check("the zip files a review copy under faculty_review/ with its reasons",
+      any(n.startswith("faculty_review/REVIEW_") and n.endswith(".pdf") for n in review_zip.namelist())
+      and any(n.endswith("_reasons.txt") for n in review_zip.namelist())
+      and not any(n.startswith("to_students/") for n in review_zip.namelist()),
+      review_zip.namelist())
+server.JOBS["job1"]["results"][0]["state"] = "released"
 server.JOBS["job1"]["results"][0]["release"] = True
+student_zip = _zipfile.ZipFile(io.BytesIO(server.job_zip("job1", "secretkey").body))
+check("the zip files a released copy under to_students/",
+      any(n.startswith("to_students/evaluated_") for n in student_zip.namelist()), student_zip.namelist())
 check("unknown job -> 404", status_of(lambda: server.job_status("nope", "x")) == 404)
 check("missing sheet index -> 404", status_of(lambda: server.job_pdf("job1", 9, "secretkey")) == 404)
 
 with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "static", "app.js"), encoding="utf-8") as handle:
     browser_js = handle.read()
-check("single-sheet held result displays the server's exact reason",
-      "Reason: ${reason}" in browser_js and "const reason = r.error" in browser_js)
+check("the browser shows a faculty-review copy with its reasons and a review download",
+      'state === "faculty_review"' in browser_js and "review_reasons" in browser_js
+      and "Download copy for faculty review" in browser_js)
+check("the browser never labels a copy ungradable any more",
+      "ungradable" not in browser_js.lower())
 
 print("== finished jobs are evicted (memory) ==")
 server.JOBS.clear()

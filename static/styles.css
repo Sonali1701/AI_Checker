@@ -74,6 +74,10 @@ table.marks{width:100%;border-collapse:collapse;margin-top:12px;font-size:.85rem
 table.marks th,table.marks td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;}
 table.marks input{padding:5px 7px;}
 table.marks td.max input{width:80px;}
+@media(max-width:640px){
+  #marksTable{table-layout:fixed;}
+  #marksTable input,#marksTable td.max input{width:100%;min-width:0;}
+}
 #marksFooter{display:flex;align-items:center;gap:16px;margin-top:10px;}
 .locked{margin-left:auto;font-size:.9rem;}
 .locked b{color:var(--brand-dark);font-size:1.05rem;}
@@ -107,7 +111,8 @@ details.rdetail summary{cursor:pointer;font-weight:600;padding:8px 0;}
 .qrow .q{width:80px;font-weight:600;}
 .qrow .m{width:70px;}
 .qrow .r{color:var(--muted);}
-.ok{color:var(--ok);} .bad{color:var(--bad);}
+.ok{color:var(--ok);} .bad{color:var(--bad);} .warn{color:#b45309;}
+.reasons{margin:4px 0 10px 18px;padding:0;color:#7c2d12;font-size:.92rem;} .reasons li{margin:2px 0;}
 
 .foot{text-align:center;color:var(--muted);font-size:.78rem;margin-top:20px;}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--brand-dark);color:#fff;
@@ -125,3 +130,39 @@ details.rdetail summary{cursor:pointer;font-weight:600;padding:8px 0;}
 #authStatus {
   margin-top: 10px;
 }
+
+
+/* Paper type: written answers or design and drawing (build 61). */
+.design-only { display: none; }
+.key-optional-only { display: none; }
+body.key-optional-mode .key-optional-only { display: revert; }
+.vidyapeeth-only { display: none; }
+body.vidyapeeth-mode .vidyapeeth-only { display: grid; }
+body.design-mode .design-only { display: revert; }
+body.design-mode .written-only { display: none !important; }
+/* A category whose papers have no class (School of Innovation) has no class field. */
+body.no-level-mode .class-level { display: none; }
+.design-note { align-self: center; font-size: 13px; line-height: 1.45; }
+.category-hint { display: block; font-size: 12.5px; line-height: 1.4; margin-top: 4px; font-weight: normal; }
+#designTable td.brief { font-size: 13px; line-height: 1.4; }
+#designTable td.brief .crit { display: block; margin-top: 4px; color: #6b7280; font-size: 12px; }
+#designTable td.max input { width: 84px; }
+
+/* Folder mode */
+.sheet-source{margin-top:14px;}
+.folder-panel{margin-top:10px;display:flex;flex-direction:column;gap:10px;}
+.folder-panel input[type=text]{width:100%;}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+@media (max-width:640px){.grid3{grid-template-columns:1fr;}}
+.bulk-path{word-break:break-all;}
+
+/* Vidyapeeth batch header (15 Oct 2026): dropdowns typed once for the whole upload,
+   then Next shows the rest of the form; the generic class, subject and language
+   inputs are filled from these and hidden. */
+.vp-block { display: none; }
+body.vidyapeeth-mode .vp-block { display: block; }
+body.vidyapeeth-mode .vp-hide, body.vidyapeeth-mode label.class-level { display: none !important; }
+body.vidyapeeth-mode.vp-step1 .later-step { display: none !important; }
+.vp-nav { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+.vp-nav .primary-btn { width: auto; padding: 10px 18px; }
+.vp-other { margin-top: 6px; }

@@ -6,10 +6,15 @@ through the shared PW proxy. The app ships no provider keys. The proxy verifies
 the signed-in PW user, checks the app whitelist, makes the provider call with
 proxy-held keys, and writes trusted raw usage logs to MongoDB.
 
-Raw logging model:
-  - One successful proxy/provider call = one raw row in MongoDB/sheet export.
-  - For multi-call tasks, create one task_id and pass it to every helper call.
-  - Combine later in Sheets/AppScript by task_id + app + email + model.
+Usage logging model:
+  - One successful proxy/provider call is recorded by the proxy. You do not
+    log anything yourself.
+  - The proxy ROLLS UP those calls server-side into one row per
+    (task, app, user, file, model) and the cost sheet reads the finished rows.
+    Apps and dashboards no longer combine raw rows themselves.
+  - ALWAYS pass a task_id. It is the only thing tying a job's calls together;
+    without one the job's volume cannot be totalled at all.
+  - count = what THIS call processed. See CONNECT-TO-PW-PROXY.md section 6.
   - Do not use client-side combined logging for normal AI calls.
 
 Everywhere a google_token is accepted you may pass either:
@@ -453,4 +458,116 @@ def gemini_image(
     _apply_task_context(payload, session, task_id)
     r = _post("/api/gemini/image", google_token, payload, _AI_TIMEOUT)
     _raise_proxy_error("gemini image", r)
+    return r.json()
+
+
+def gpt_generate(
+    google_token,
+    *,
+    request: dict,
+    model: str = "gpt-5.6-luna-ard-content",
+    filename: str = "",
+    input_unit: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call a ChatGPT model through the proxy.
+
+    `request` is a native OpenAI chat.completions body and is sent through
+    unchanged, e.g. {"messages": [{"role": "user", "content": "hi"}]}. Images
+    and PDFs go in as base64 data URLs in the usual OpenAI content-part form.
+    Models: gpt-5.6-luna-ard-content | gpt-5.6-sol-ard-content |
+    gpt-5.6-terra-ard-content. Check what is live: GET /api/gpt/models.
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "request": request,
+        "filename": filename,
+        "input_unit": input_unit,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    blob_url = _upload_large_json(google_token, payload["app"], request, "gpt")
+    if blob_url:
+        payload.pop("request")
+        payload["request_blob_url"] = blob_url
+
+    r = _post("/api/gpt/generate", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt", r)
+    return r.json()
+
+
+def gpt_tts(
+    google_token,
+    *,
+    text: str,
+    voice: str = "alloy",
+    model: str = "tts-ard-content",
+    response_format: str = "mp3",
+    filename: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call OpenAI text-to-speech through the proxy.
+
+    Voices: alloy | echo | fable | onyx | nova | shimmer.
+    Models: tts-ard-content (standard) | tts-hd-ard-content (higher quality).
+    Returns {"result": {"audio_base64": ..., "content_type": ...}, ...}.
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "text": text,
+        "voice": voice,
+        "response_format": response_format,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/gpt/tts", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt tts", r)
+    return r.json()
+
+
+def gpt_image(
+    google_token,
+    *,
+    prompt: str,
+    model: str = "gpt-image-2-litellm",
+    size: str = "",
+    quality: str = "",
+    filename: str = "",
+    count: Any = 1,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call OpenAI image generation through the proxy.
+
+    Returns {"result": {"images": [{"image_base64"|"url", "content_type"}],
+    "revised_prompt": ...}, ...}. `count` is the number of images (n).
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "quality": quality,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/gpt/image", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt image", r)
     return r.json()

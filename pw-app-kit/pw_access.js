@@ -5,10 +5,15 @@
  * proxy, which verifies the signed-in PW user, checks the app whitelist, calls
  * the provider with proxy-held keys, and writes trusted raw usage logs.
  *
- * Raw logging model:
- *   - One successful proxy/provider call = one raw row in MongoDB/sheet export.
- *   - For multi-call tasks, create one task_id and pass it to every helper.
- *   - Combine later in Sheets/AppScript by task_id + app + email + model.
+ * Usage logging model:
+ *   - One successful proxy/provider call is recorded by the proxy. You do not
+ *     log anything yourself.
+ *   - The proxy ROLLS UP those calls server-side into one row per
+ *     (task, app, user, file, model) and the cost sheet reads the finished
+ *     rows. Apps and dashboards no longer combine raw rows themselves.
+ *   - ALWAYS pass a task_id. It is the only thing tying a job's calls
+ *     together; without one the job's volume cannot be totalled at all.
+ *   - `count` = what THIS call processed. See CONNECT-TO-PW-PROXY.md section 6.
  */
 
 export const APP_NAME = "SET-YOUR-APP-NAME";
@@ -327,5 +332,98 @@ export async function geminiImage(
   applyTaskContext(body, session, task_id || taskId);
   const r = await postJSON("/api/gemini/image", googleToken, body, AI_TIMEOUT_MS);
   await raiseProxyError("gemini image", r);
+  return await r.json();
+}
+
+/**
+ * Call a ChatGPT model through the proxy.
+ *
+ * `request` is a native OpenAI chat.completions body and is sent through
+ * unchanged, e.g. { messages: [{ role: "user", content: "hi" }] }. Images and
+ * PDFs go in as base64 data URLs in the usual OpenAI content-part form.
+ * Models: gpt-5.6-luna-ard-content | gpt-5.6-sol-ard-content |
+ * gpt-5.6-terra-ard-content. Check what is live: GET /api/gpt/models.
+ */
+export async function gptGenerate(
+  googleToken,
+  {
+    request,
+    model = "gpt-5.6-luna-ard-content",
+    filename = "",
+    input_unit = "",
+    count = null,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, request, filename, input_unit, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const blobUrl = await uploadLargeJson(googleToken, app, request, "gpt");
+  if (blobUrl) {
+    delete body.request;
+    body.request_blob_url = blobUrl;
+  }
+  const r = await postJSON("/api/gpt/generate", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("gpt", r);
+  return await r.json();
+}
+
+/**
+ * Call OpenAI text-to-speech through the proxy.
+ * Voices: alloy | echo | fable | onyx | nova | shimmer.
+ * Models: tts-ard-content (standard) | tts-hd-ard-content (higher quality).
+ * Returns { result: { audio_base64, content_type }, ... }.
+ */
+export async function gptTts(
+  googleToken,
+  {
+    text,
+    voice = "alloy",
+    model = "tts-ard-content",
+    response_format = "mp3",
+    filename = "",
+    count = null,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, text, voice, response_format, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const r = await postJSON("/api/gpt/tts", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("gpt tts", r);
+  return await r.json();
+}
+
+/**
+ * Call OpenAI image generation through the proxy.
+ * Returns { result: { images: [{ image_base64 | url, content_type }],
+ * revised_prompt }, ... }. `count` is the number of images (n).
+ */
+export async function gptImage(
+  googleToken,
+  {
+    prompt,
+    model = "gpt-image-2-litellm",
+    size = "",
+    quality = "",
+    filename = "",
+    count = 1,
+    task_id = "",
+    taskId = "",
+    video_duration = "",
+    app = APP_NAME,
+    session = null,
+  },
+) {
+  const body = { app, model, prompt, size, quality, filename, count, video_duration };
+  applyTaskContext(body, session, task_id || taskId);
+  const r = await postJSON("/api/gpt/image", googleToken, body, AI_TIMEOUT_MS);
+  await raiseProxyError("gpt image", r);
   return await r.json();
 }

@@ -18,6 +18,12 @@ from grader import (AuditItem, Criterion, GradeReport, MarksItem, MarksScheme,
                     pdf_text_layer)
 from mathpix import LineBox, PageOCR
 from pdf_renderer import build_evaluated_pdf
+
+# A legacy-contract suite: marks stay inside the sheet and within reach of their
+# evidence row, and checking plans are drawn. The teacher layout (the product
+# default) has its own contract in test_teacher_layout.py.
+import pdf_renderer as _pr
+_pr.TEACHER_LAYOUT = False
 from preflight import check_copy
 from selective_verification import verification_candidates
 from selective_verification import visual_evidence_qids
@@ -137,11 +143,17 @@ value_ocr = [PageOCR(page=1, image_width=300, image_height=400, lines=[
     LineBox("P1L2", "2.) (A) True statement", (30, 90, 220, 110), 1),
 ])]
 value_report = reconcile_report_to_package(value_report, package)
+# Since the key-blind active-answer rule (test_objective_active_corrections), an OCR
+# glyph and the option's words that disagree with no visual read to settle them are
+# not decided by the words alone: the row is scored on its glyph and named for a
+# faculty check (SCHOOL rule 7f: a letter and a value that disagree earn 0). With
+# two readers who split, the words decide (test_parishram_humanities_1008).
 value_notes = apply_official_objective_evidence(
-    value_report, package, value_ocr, question_paper_text=value_paper)
-check("Economics Q1 wording restores the mark despite glyph A",
-      value_report.questions[0].score == 1.0
-      and value_report.questions[0].chosen_option == "C", value_notes)
+    value_report, package, value_ocr, question_paper_text=value_paper,
+    allow_unconfirmed=True)
+check("Economics Q1 glyph and wording disagree: named for a check, not silently scored",
+      "Q1" in value_report.objective_unconfirmed_qids
+      and any("disagree" in note for note in value_notes), value_notes)
 check("a matching official glyph remains correct",
       value_report.questions[1].score == 1.0, value_notes)
 
@@ -332,7 +344,7 @@ check("a concise concrete correction completes verification",
           selected_qids={"8"}))
 overlong_feedback = GradeReport(total_score=1.5, max_total=2, overall_remarks="", questions=[
     question("Q12", 1.5, 2,
-             remark="Use interval notation because the complete real solution set must include every value strictly greater than minus two",
+             remark="Use interval notation because the complete real solution set must include every value strictly greater than minus two, and the answer must also state that minus two itself is excluded from the set",
              criteria=[Criterion(description="Real number solutions", awarded=1.5,
                                  max=2, met=False, evidence="Use (-2, infinity)",
                                  step_line_id="P1L1")]),
@@ -377,6 +389,7 @@ rendered = build_evaluated_pdf(student_pdf, "student.pdf", [], render_report, re
                                safe_layout=True)
 out = fitz.open(stream=rendered, filetype="pdf")
 sheet_top = out[0].rect.height - 400
+margin_edge = render_report.render_page_layouts["1"]["margin_bbox"][0]
 inline_red_numbers = []
 margin_qids = []
 for block in out[0].get_text("dict")["blocks"]:
@@ -386,9 +399,9 @@ for block in out[0].get_text("dict")["blocks"]:
             x0, y0, x1, y1 = span["bbox"]
             color = int(span.get("color", 0))
             red = ((color >> 16) & 255) > ((color >> 8) & 255) + 55
-            if red and y0 >= sheet_top and x1 < 300 and re.fullmatch(r"\d+(?:\.\d+)?", text):
+            if red and y0 >= sheet_top and x1 < margin_edge and re.fullmatch(r"\d+(?:\.\d+)?", text):
                 inline_red_numbers.append((text, span["bbox"]))
-            if y0 >= sheet_top and x0 > 300 and text.startswith(("Q1", "Q2", "Q5", "Q15")):
+            if y0 >= sheet_top and x0 >= margin_edge and text.startswith(("Q1", "Q2", "Q5", "Q15")):
                 margin_qids.append(text)
 content_red_drawings = []
 for drawing in out[0].get_drawings():
@@ -397,9 +410,9 @@ for drawing in out[0].get_drawings():
     if not rect or not color or rect.y0 <= sheet_top + 1.0:
         continue
     red = color[0] > color[1] + 0.2 and color[0] > color[2] + 0.2
-    # x=300 is the strip divider and is allowed; no generated red path may enter
-    # the original 300-point-wide student page.
-    if red and rect.x0 < 299.5:
+    # The right strip's divider is allowed; legacy safe layout keeps generated
+    # verdicts out of the original student page to its left.
+    if red and rect.x1 < margin_edge - .5:
         content_red_drawings.append(tuple(round(v, 2) for v in rect))
 out.close()
 check("no circled score obscures an answer", not inline_red_numbers, inline_red_numbers)

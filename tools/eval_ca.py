@@ -149,7 +149,7 @@ def main() -> None:
     ap.add_argument("--token", default="")
     ap.add_argument("--token-file", default="")
     ap.add_argument("--out", default="eval_ca_out")
-    ap.add_argument("--model", default="", help="override model (default: auto -> gemini-2.5-pro)")
+    ap.add_argument("--model", default="", help="override Claude model (default: auto by paper size)")
     ap.add_argument("--jobs", type=int, default=3,
                     help="booklets graded concurrently (model calls are I/O-bound; 3-4 fits a 1-hour token)")
     ap.add_argument("--spread", action="store_true",
@@ -193,7 +193,7 @@ def main() -> None:
         try:
             sa_bytes = requests.get(row["student_file"], timeout=120).content
             cfg = cfg_from_request(
-                "gemini", args.model, row["subject"],
+                "claude", args.model, row["subject"],
                 google_token=token,
                 task_id=pw_access.new_task_id("eval-ca"),
                 student_class=row["student_class"],

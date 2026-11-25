@@ -37,6 +37,41 @@ def is_red(color) -> bool:
     return bool(color) and color[0] > 0.6 and color[1] < 0.4 and color[2] < 0.4
 
 
+def _mark_count(strokes: list[tuple[int, "fitz.Rect"]]) -> int:
+    """How many distinct marks those strokes draw.
+
+    A tick is ~16 tapered sub-segments and a circled number is a circle plus its
+    digits, so strokes have to be grouped before they can be counted. 8pt is well
+    above the ~1.5pt spacing along one stroke and well below the gap between two
+    marks on neighbouring lines of ordinary handwriting.
+    """
+    groups: list[tuple[int, "fitz.Rect"]] = []
+    for page, rect in strokes:
+        hit = None
+        for gi, (gp, gr) in enumerate(groups):
+            if gp == page and (gr + (-8, -8, 8, 8)).intersects(rect):
+                hit = gi
+                break
+        if hit is None:
+            groups.append((page, +rect))
+        else:
+            groups[hit] = (page, groups[hit][1] | rect)
+    merged = True
+    while merged:
+        merged = False
+        for a in range(len(groups)):
+            for b in range(a + 1, len(groups)):
+                if (groups[a][0] == groups[b][0]
+                        and (groups[a][1] + (-8, -8, 8, 8)).intersects(groups[b][1])):
+                    groups[a] = (groups[a][0], groups[a][1] | groups[b][1])
+                    del groups[b]
+                    merged = True
+                    break
+            if merged:
+                break
+    return len(groups)
+
+
 def check_copy(slug: str, case_dir: str, official_total: float | None) -> list[tuple[str, bool, str]]:
     out: list[tuple[str, bool, str]] = []
 
@@ -102,6 +137,7 @@ def check_copy(slug: str, case_dir: str, official_total: float | None) -> list[t
 
     # Marks on the student's own answer, not only stacked in the margin.
     on_answer = in_strip = 0
+    strokes: list[tuple[int, "fitz.Rect"]] = []
     for i in range(doc.page_count):
         page = doc[i]
         edge = content_width(page.rect.width)
@@ -113,10 +149,26 @@ def check_copy(slug: str, case_dir: str, official_total: float | None) -> list[t
                 continue  # the strip's own border rule, not a mark
             if rect.x1 <= edge + 2:
                 on_answer += 1
+                strokes.append((i, +rect))
             elif rect.x0 >= edge - 2:
                 in_strip += 1
     add("marks are drawn on the student's answer", on_answer > 0,
         f"on-answer {on_answer}, strip {in_strip}")
+
+    # ...and on EVERY answer, not just somewhere on the copy. "on_answer > 0" passed
+    # on a copy where a part-marked question carried nothing at all: not ticked (it
+    # is not right), not crossed (it is not wrong), its total printed 200pt away in
+    # the margin. One question in three can go unmarked and this check still saw a
+    # well-marked copy, because it was counting strokes for the whole PDF.
+    marks = _mark_count(strokes)
+    blank_words = ("unattempt", "not attempt", "not graded", "no answer",
+                   "left blank", "blank answer")
+    attempted = [q for q in questions
+                 if not any(w in (q.get("remark") or "").lower() for w in blank_words)]
+    add("there is a mark on the sheet for every answer the student wrote",
+        marks >= len(attempted),
+        f"{marks} mark(s) drawn for {len(attempted)} attempted question(s)"
+        f" ({len(questions) - len(attempted)} unattempted)")
 
 
     # WHAT A READER SEES, not just what the numbers add up to. Both of the faults a

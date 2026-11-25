@@ -179,13 +179,13 @@ check("question total falls to 6/10", abs(lowered.questions[0].score - 6) < 1e-9
 check("net movement negative", abs(moved + 4) < 1e-9, f"got {moved}")
 
 print("== cost policy ==")
-pro = ProviderConfig(model="gemini-2.5-pro", exam_type="professional")
-budget = ProviderConfig(model="gemini-2.5-flash", exam_type="professional")
-claude = ProviderConfig(provider="claude", model="claude-opus-4-8", exam_type="professional")
-check("audit always runs on the pro model", audit_model_for(budget) == "gemini-2.5-pro")
-check("claude audits on its own model", audit_model_for(claude) == "claude-opus-4-8")
+pro = ProviderConfig(provider="claude", model="claude-opus-4-8", exam_type="professional")
+budget = ProviderConfig(provider="claude", model="claude-haiku-4-5", exam_type="professional")
+check("audit always runs on the strongest Claude model", audit_model_for(budget) == "claude-opus-4-8")
+check("a Gemini config is coerced to Claude", ProviderConfig(
+      model="gemini-2.5-flash", exam_type="professional").is_claude)
 check("cheap grader => audit checks awards too", audits_awarded_marks(budget))
-check("pro grader => audit checks deductions only", not audits_awarded_marks(pro))
+check("strongest grader => audit checks deductions only", not audits_awarded_marks(pro))
 check("professional applies", moderation_applies(budget, "Physics"))
 check("commerce subject applies", moderation_applies(ProviderConfig(exam_type="school"), "Accountancy"))
 check("school physics does not", not moderation_applies(ProviderConfig(exam_type="school"), "Physics"))
@@ -201,7 +201,6 @@ print("== who audits whom, and whether awards are re-checked ==")
 # (unchanged — this was already right). See pipeline.audit_model_for's docstring
 # for the full measurement this is pinned against.
 from pipeline import (
-    AUDIT_MODEL,
     _CLAUDE_SECOND_OPINION_MODEL,
     audit_model_for,
     audits_awarded_marks,
@@ -224,12 +223,11 @@ check("that pairing DOES re-check awarded marks (real second opinion, not self-a
       audits_awarded_marks(route))
 check("haiku is also audited by opus, never by itself",
       audit_model_for(_cfg("claude", "claude-haiku-4-5")) == _CLAUDE_SECOND_OPINION_MODEL)
-check("a cheap GEMINI grader is checked by the stronger auditor",
-      audit_model_for(_cfg("gemini", "gemini-2.5-flash", "Class 12")) == AUDIT_MODEL)
+check("a GEMINI request is graded on Claude and audited by the stronger Claude model",
+      audit_model_for(_cfg("gemini", "gemini-2.5-flash", "Class 12"))
+      == _CLAUDE_SECOND_OPINION_MODEL)
 check("and that pairing DOES re-check awarded marks",
       audits_awarded_marks(_cfg("gemini", "gemini-2.5-flash", "Class 12")))
-check("the auditor never second-guesses its own awards (gemini side)",
-      not audits_awarded_marks(_cfg("gemini", AUDIT_MODEL)))
 check("the auditor never second-guesses its own awards (claude side)",
       not audits_awarded_marks(_cfg("claude", _CLAUDE_SECOND_OPINION_MODEL)))
 

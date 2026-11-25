@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PW Skills copies</title>
+<link rel="stylesheet" href="/styles.css"><style>
+body{background:var(--bg)} .wrap{max-width:1150px}
+input[type=search]{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);width:100%}
+input:focus-visible,button:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+h3.sec{margin:18px 0 8px;font-size:.95rem;color:var(--brand-dark);display:flex;align-items:center;gap:8px}
+h3.sec:first-of-type{margin-top:6px} h3.sec .muted{margin:0;font-weight:500}
+.statusline{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0 4px}
+.dot{width:11px;height:11px;border-radius:50%;background:#c7c9d9;flex:0 0 auto}
+.dot.ok{background:var(--ok)} .dot.wait{background:#d97706} .dot.bad{background:var(--bad)}
+#adminState{font-weight:600}
+.searchbar{display:flex;gap:8px} .searchbar input{flex:1;font-size:1rem;padding:11px 13px}
+.searchbar .primary-btn{width:auto;padding:10px 20px}
+.batch-list{margin-top:8px;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
+.batch-list:empty{display:none}
+.batch-item{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:#fff;border:0;border-bottom:1px solid var(--line);
+  padding:11px 14px;cursor:pointer;font:inherit;color:var(--ink)}
+.batch-item:last-child{border-bottom:0} .batch-item:hover,.batch-item:focus{background:#f3f3ff;outline:none}
+.batch-item .name{flex:1;min-width:0} .batch-item .title{font-weight:600;display:block}
+.code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;background:#eef0ff;color:var(--brand-mid);
+  padding:2px 8px;border-radius:6px;display:inline-block;margin-top:3px;word-break:break-all}
+.batch-item.exact{background:#f0faf3} .batch-item.exact:hover{background:#e4f5e9}
+.tag{font-size:.72rem;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap}
+.tag.exact{background:#dcf3e3;color:#15602e} .tag.pick{background:var(--brand);color:#fff}
+mark{background:#fff1a8;color:inherit;border-radius:3px;padding:0 1px}
+.picked{display:flex;align-items:center;gap:14px;border:2px solid var(--brand);background:#f6f6ff;border-radius:12px;padding:12px 16px}
+.picked .name{flex:1;min-width:0} .picked .title{font-weight:700;font-size:1.02rem}
+.info{font-size:.85rem;color:var(--muted);margin:8px 2px 0}
+.info.good{color:var(--ok);font-weight:600} .info.bad{color:var(--bad);font-weight:600}
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap} .toolbar input{flex:1;min-width:180px}
+.titles{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px 10px;background:#fff;
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:2px 16px}
+.titles label{flex-direction:row;align-items:center;gap:8px;font-weight:500;padding:5px 2px;cursor:pointer}
+.titles .empty{color:var(--muted);font-size:.88rem;padding:6px 2px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{font-size:.8rem;padding:3px 10px;border-radius:999px;background:#e8f5ec;color:#15602e;font-weight:600}
+.chip.bad{background:#fdecea;color:#a12622}
+details.more{margin-top:14px;border:1px solid var(--line);border-radius:10px;padding:2px 14px}
+details.more summary{cursor:pointer;font-weight:600;padding:10px 0;color:#34324f}
+details.more .grid2{margin-bottom:12px}
+.switch{flex-direction:row;align-items:center;gap:10px;margin:16px 0 6px;font-size:.92rem}
+.switch input{width:18px;height:18px}
+.warnbox{background:#fff4e5;border:1px solid #f3c27a;color:#7a4300;border-radius:10px;padding:10px 14px;font-size:.88rem}
+.startbar{display:flex;align-items:center;gap:16px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line);flex-wrap:wrap}
+.startbar .summary-line{flex:1;min-width:260px;font-size:.9rem;color:#34324f}
+.startbar .primary-btn{width:auto;padding:12px 28px}
+table.list{width:100%;border-collapse:collapse;font-size:.88rem}
+table.list th{background:#f7f7fd;color:#4a4870;font-size:.78rem;text-transform:uppercase;letter-spacing:.4px}
+table.list th,table.list td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.list tr.current td{background:#f6f6ff}
+.table-wrap{overflow-x:auto}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:.75rem;font-weight:700;background:#eef;color:#334;white-space:nowrap}
+.pill.ready,.pill.done{background:#e6f4ea;color:#17602e} .pill.posted,.pill.already_evaluated{background:#d7ecff;color:#0b4f8a}
+.pill.held,.pill.failed,.pill.needs_sign_in{background:#fdecea;color:#a12622}
+.pill.checking,.pill.running,.pill.posting{background:#ece9ff;color:#4338ca} .pill.queued,.pill.stopped,.pill.interrupted{background:#f1f1f4;color:#4b4b5c}
+.mini-bar{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:6px;min-width:120px}
+.mini-bar span{display:block;height:100%;background:linear-gradient(90deg,var(--brand-mid),var(--brand))}
+.runhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 12px}
+.runhead .meta{color:var(--muted);font-size:.85rem}
+.tiles{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.tile{border:1px solid var(--line);background:#fff;border-radius:12px;padding:9px 14px;cursor:pointer;min-width:118px;text-align:left;font:inherit}
+.tile .v{font-size:1.35rem;font-weight:800;color:var(--brand-dark)} .tile .k{font-size:.74rem;color:var(--muted);font-weight:600}
+.tile.on{border-color:var(--brand);box-shadow:0 0 0 2px #c7c4ff inset;background:#f6f6ff}
+.tile.attn .v{color:#b45309}
+.actionbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:0;background:#fff;padding:8px 0;z-index:2}
+.actionbar .grow{flex:1}
+.actionbar .primary-btn{width:auto}
+.learner .nm{font-weight:600} .note{color:#555;font-size:.8rem;margin-top:4px;white-space:pre-wrap}
+.note.slow{color:#b45309;font-weight:600}
+.marks-big{font-weight:800;font-size:1.02rem;white-space:nowrap}
+td.row-actions{white-space:nowrap} td.row-actions button{margin:0 6px 6px 0}
+.editor{background:#fafaff} .editor textarea{min-height:170px;font-family:inherit;font-size:.9rem}
+.editor .marks{width:110px} .editor .counter{font-size:.8rem;color:var(--muted);margin-top:4px}
+.editor .counter.over{color:var(--bad);font-weight:700}
+.empty-row td{color:var(--muted);text-align:center;padding:18px}
+.toast.ok{background:#15602e} .toast.bad{background:#8f1d1a}
+.report{margin-top:16px;border-top:1px solid var(--line);padding-top:6px}
+.report-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.report-head .primary-btn{width:auto}
+.report-body p{margin:6px 0;font-size:.9rem} .report ul{margin:4px 0 8px 18px;padding:0;font-size:.9rem}
+.report li{margin:2px 0} .report li b{display:inline-block;min-width:30px}
+.hero a{color:#fff;text-decoration:underline}
+@media(max-width:640px){.searchbar{flex-direction:column}.startbar .primary-btn{width:100%}}
+</style></head><body class="auth-locked"><main class="wrap">
+<header class="hero"><div class="badge">PW</div><div><h1>PW Skills copies</h1><p>Find the batch, check the learners' copies with AI, and post marks and feedback to the admin portal</p><a href="/workflow.html" id="workflowLink">Open copy workflow</a></div></header>
+
+<section id="authCard" class="card auth-card">
+<div class="step"><span class="n">PW</span><span class="t" id="authTitle">Sign in to this tool</span></div>
+<p class="sub" id="authSub">Use your authorized @pw.live Google account.</p>
+<div id="googleSignIn"></div><div class="actions"><button id="signOut" class="hidden ghost-btn small" type="button">Sign out</button><button id="authRetry" class="hidden ghost-btn small" type="button">Retry sign-in</button></div>
+<div id="authStatus" role="status">Preparing sign-in…</div></section>
+
+<section class="card" id="adminCard"><div class="step"><span class="n">1</span><span class="t">Admin portal</span></div>
+<div class="statusline"><span id="adminDot" class="dot"></span><span id="adminState" role="status">Checking…</span>
+<button id="adminOpen" class="primary-btn small" type="button">Sign in to the admin portal</button></div>
+<p class="sub" id="adminHelp">A window opens at admin-v2.penpencil.co. Sign in once with an admin account and it closes by itself.</p></section>
+
+<section class="card" id="setupCard"><div class="step"><span class="n">2</span><span class="t">What to check</span></div>
+<h3 class="sec">Batch</h3>
+<div id="pickedBatch" class="picked hidden"><div class="name"><span class="title" id="pickedTitle"></span><span class="code" id="pickedCode"></span></div>
+<button id="changeBatch" class="ghost-btn small" type="button">Change batch</button></div>
+<div id="batchFinder">
+<form id="searchForm" class="searchbar" autocomplete="off"><input id="courseSearch" type="search" aria-label="Search batches" placeholder="Batch code or name, for example Pro_ON_MSF_Sept26">
+<button class="primary-btn small" type="submit">Search</button></form>
+<p class="info" id="searchInfo">Type the batch code for an exact match. You can also paste "Course name | Batch code" from a sheet.</p>
+<div id="batchList" class="batch-list" role="listbox" aria-label="Batches found"></div></div>
+
+<h3 class="sec">Assignments <span class="muted" id="titleCount"></span></h3>
+<div class="toolbar"><input id="titleFilter" type="search" aria-label="Filter assignments" placeholder="Filter assignments">
+<button id="titlesAll" class="ghost-btn small" type="button">Tick all shown</button><button id="titlesNone" class="ghost-btn small" type="button">Clear</button></div>
+<div id="titles" class="titles"><span class="empty">Choose a batch first.</span></div>
+<p class="info">Leave every box unticked to take all assignments of the batch.</p>
+
+<h3 class="sec">Learners</h3>
+<input id="learners" type="text" aria-label="Only these learners" placeholder="Leave empty for every learner, or type phone numbers or emails with commas between">
+<div id="learnerChips" class="chips"></div>
+
+<details class="more"><summary>More options</summary>
+<div class="grid2"><label>Most copies in this run, oldest first (0 means all)<input id="mostCopies" type="number" min="0" step="1" value="5"></label>
+<label>Copies checked at the same time (1 to 10)<input id="copiesAtOnce" type="number" min="1" max="10" step="1" value="3"></label></div></details>
+
+<label class="switch"><input id="autoPost" type="checkbox"> Post marks by itself, with no one approving each copy</label>
+<div id="autoWarn" class="warnbox hidden">Marks and feedback go to each learner as soon as the copy is checked. Evaluate is final: the learner cannot submit again. Leave this off to read every mark first.</div>
+
+<div class="startbar"><div class="summary-line" id="startSummary">Choose a batch to start.</div>
+<button id="start" class="primary-btn" type="button" disabled>Fetch and check</button></div></section>
+
+<section class="card" id="runsCard"><div class="step"><span class="n">3</span><span class="t">Runs</span></div>
+<div class="table-wrap"><table class="list"><thead><tr><th>Started</th><th>Batch</th><th>Status</th><th>Progress</th><th></th></tr></thead><tbody id="runs"></tbody></table></div></section>
+
+<section class="card hidden" id="runCard"><div class="step"><span class="n">4</span><span class="t" id="runTitle">Copies</span></div>
+<div class="runhead"><span id="runPill" class="pill"></span><span id="runStatus" role="status"></span><span class="meta" id="runMeta"></span></div>
+<div class="tiles" id="tiles"></div>
+<div class="actionbar"><button id="selectReady" class="ghost-btn small" type="button">Tick all checked copies</button>
+<button id="post" class="primary-btn small" type="button" disabled>Post ticked marks</button><span class="grow"></span>
+<button id="stop" class="ghost-btn small" type="button">Stop</button><button id="resume" class="ghost-btn small" type="button">Resume / fetch new copies</button></div>
+<div class="table-wrap"><table class="list"><thead><tr><th></th><th>Learner</th><th>Assignment</th><th>Marks</th><th>Status</th><th></th></tr></thead><tbody id="copies"></tbody></table></div>
+<div id="reportBox" class="report hidden"><div class="report-head"><h3 class="sec">Run report</h3>
+<button id="downloadReport" class="primary-btn small" type="button">Download report (Excel)</button></div>
+<div id="reportBody" class="report-body"></div>
+<p class="info">The Excel file lists every copy with its status and reason, every link in each submission with what the checker did with it, and the files it read.</p></div></section>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+</main><script src="https://accounts.google.com/gsi/client" async defer></script><script src="/workflow-auth.js"></script><script src="/skills.js"></script></body></html>
